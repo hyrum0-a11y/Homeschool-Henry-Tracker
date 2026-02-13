@@ -1,0 +1,35 @@
+# Ignore clasp credentials and config
+.clasp.json
+.clasp.json.*
+appsscript.json
+
+# Node.js
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+.npm/
+.yarn/
+
+# Google credentials
+credentials.json
+
+# Editor/OS related files
+.DS_Store
+.env
+.vscode/
+*.log
+*.tmp
+*.bak
+*~
+Thumbs.db
+
+# Lesson import images
+imports/
+
+# Windows artifacts
+nul
+
+# Claude Code
+.claude/
