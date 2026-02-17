@@ -4,29 +4,78 @@ A gamified homeschool progress tracker that turns learning objectives into a vid
 
 ## Features
 
-- **Student HUD Dashboard** — Radar charts, stat bars, confidence ranking, sector map with boss orbs
-- **Quest Board** — Students can take on quests to prove mastery of learning objectives
-- **Objective Catalog** — Browse subjects, assign objectives to students, manage locked/engaged/enslaved statuses
+### Student HUD Dashboard
+- Animated shimmer title with Minecraft pixel art sprites
+- Radar charts, confidence bar, and 4 individual stat bars (Intel, Stamina, Tempo, Reputation)
+- Stat bars show current rank with `+N for [next level]` format
+- **Game Mode Display** — Creative Mode / Survival Mode banner with Minecraft-style pixel hearts that glow proportionally to boss conquest progress
+- **Ring of Guardians** — Visual orbs showing survival-required bosses with conic gradient fill indicating progress
+- **Boss Conquest Rankings** — Bosses with remaining minions, sorted by completion percentage, linking to boss detail pages
+- Sector map with clickable boss orbs and pie-chart progress indicators
+
+### Quest Board
+- Students take on quests to prove mastery of learning objectives
+- Task details pulled from Sectors sheet (not generic AI suggestions)
+- Artifact type dropdown and proof link submission
+- Submit button disabled until proof text is entered
+- Multi-select quest adding from boss and sector pages (batch checkbox selection)
+- Quest status synced to Sectors sheet "Quest Status" column on every transition
+
+### Quest Approval (Admin)
+- Full quest lifecycle: Active → Submitted → Approved / Rejected
+- Approve auto-enslaves the minion (Status → "Enslaved" on Sectors sheet)
+- Reject keeps quest on board for student feedback; can be reopened
+- Sync button to backfill existing quest statuses to Sectors sheet
+
+### Survival Mode System
+- Per-boss "Survival Mode Required" flag (Minecraft-inspired Creative vs Survival concept)
+- Manage toggles from admin with confirmation dialogs in both directions
+- HUD shows mode banner, proportionally glowing hearts, and Ring of Guardians orbs
+- Hearts and orbs sorted by conquest rate (highest first, then alphabetical)
+
+### Objective Catalog
+- Browse subjects, assign objectives to students
+- Update and manage locked/engaged/enslaved statuses
+- Student Task column is authoritative (protected from catalog overrides)
+- Removal warning about impact on total possible points
+- Multi-select quest adding with batch submission
+
+### Other Features
 - **AI Photo Import** — Upload lesson photos and Claude AI classifies them into the tracker
-- **AI Catalog Population** — Generate high-school-level learning objectives with AI to populate the master catalog
-- **Locked Items Management** — Set prerequisites and unlock objectives when students are ready
+- **AI Catalog Population** — Generate high-school-level learning objectives with AI
+- **Locked Items Management** — Set prerequisites and unlock objectives when ready
 - **Army Page** — View all completed (enslaved) minions grouped by sector
 
 ## Architecture
 
-- **server.js** — Single-file Express server serving inline HTML with a dark cyberpunk theme
+- **server.js** — Single-file Express server (~5000+ lines) serving inline HTML with a dark cyberpunk/Minecraft hybrid theme
 - **Google Sheets** — Two spreadsheets:
   - **Student Sheet** — Per-student data (Sectors, Definitions, Command_Center, Quests tabs)
   - **Master Catalog** — Shared catalog of all learning objectives with subject mappings
 - **Claude AI** — Used for photo classification and objective generation (via Anthropic API)
 
+### Key Patterns
+- Dynamic column lookup (never hardcoded column positions)
+- Row builder pattern: `valueMap` + `headers.map((h) => valueMap[h] ?? "")`
+- Composite key matching: `Sector|Boss|Minion` for cross-sheet identification
+- Template placeholder system: `html.split("[[PLACEHOLDER]]").join(value)`
+
 ## Status Definitions
 
 | Status | Meaning |
 |--------|---------|
-| **Engaged** | Available for the student to work on |
 | **Locked** | Has a prerequisite that must be completed first |
+| **Engaged** | Available for the student to work on |
 | **Enslaved** | Completed/mastered by the student |
+
+### Quest Status (synced to Sectors sheet)
+
+| Quest Status | Meaning |
+|--------------|---------|
+| **Active** | Quest started, student working on it |
+| **Submitted** | Student submitted proof, awaiting teacher review |
+| **Approved** | Teacher approved; minion auto-enslaved |
+| **Rejected** | Teacher rejected; student can re-submit |
 
 ## Setup
 
@@ -57,20 +106,28 @@ Then open http://localhost:3000
 - `setup-drive.js` — Creates Google Drive folder structure
 - `setup-catalog-table.js` — Adds Subject column and formats catalog as a Google Sheets table
 - `fix-catalog-filter.js` — Re-expands catalog table filter after adding rows
+- `backfill-subject.js` — Backfills Subject column for existing rows
+- `backfill-task.js` — Backfills Task column for existing rows
+
+### Sectors Sheet Setup
+Ensure the Sectors sheet has these columns in the header row:
+- Sector, Subject, Boss, Minion, Task, Status, Impact(1-3), Locked for what?, Survival Mode Required, Quest Status, INTELLIGENCE, STAMINA, TEMPO, REPUTATION
 
 ## Routes
 
 | Route | Description |
 |-------|-------------|
 | `/` | Main HUD dashboard |
-| `/boss/:bossName` | Boss detail page with minion table |
-| `/quests` | Quest board |
+| `/boss/:bossName` | Boss detail page with minion table and multi-select quest adding |
+| `/sector/:sectorName` | Sector overview with all bosses and multi-select quest adding |
+| `/quests` | Quest board with proof submission |
 | `/army` | All enslaved minions |
 | `/admin` | Parent admin console |
+| `/admin/quests` | Quest approval (approve, reject, reopen, sync) |
 | `/admin/import` | AI photo import |
 | `/admin/catalog` | Subject picker (objective catalog) |
-| `/admin/catalog/view` | Browse objectives by subject |
-| `/admin/catalog/student` | View current student items |
+| `/admin/catalog/view` | Browse and remove objectives by subject |
+| `/admin/catalog/student` | Manage student items and survival mode toggles |
 | `/admin/catalog/locked` | Manage locked items and prerequisites |
 | `/admin/catalog/generate` | AI objective generation |
 

@@ -361,15 +361,20 @@ function processAllData(html, dataSheet) {
   }
 
   // 5. BUILD THE FRONTIER DATA (ENSLAVEMENT ENGINE)
-  // Pulling Sector data: A=Sector, B=Boss, C=Minion, D=Status, E=Intel, F=Stam, G=Tempo, H=Rep
-  const sectorData = sectorSheet.getRange("A2:H100").getValues(); 
+  // Dynamic header lookup — column order doesn't matter
+  const sectorHeaders = sectorSheet.getRange(1, 1, 1, sectorSheet.getLastColumn()).getValues()[0];
+  const sCol = sectorHeaders.indexOf("Sector");
+  const bCol = sectorHeaders.indexOf("Boss");
+  const stCol = sectorHeaders.indexOf("Status");
+  const lastDataRow = Math.max(sectorSheet.getLastRow(), 2);
+  const sectorData = sectorSheet.getRange(2, 1, lastDataRow - 1, sectorSheet.getLastColumn()).getValues();
   let bossMap = {};
 
   // Step A: Group Minions by Boss and Count by Status
   for (let i = 0; i < sectorData.length; i++) {
-    let sector = sectorData[i][0];
-    let bossName = sectorData[i][1];
-    let status = sectorData[i][3];
+    let sector = sectorData[i][sCol];
+    let bossName = sectorData[i][bCol];
+    let status = sectorData[i][stCol];
 
     if (!sector || !bossName) continue;
 

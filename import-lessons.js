@@ -302,8 +302,12 @@ function buildRow(headers, data) {
     Boss: data.boss,
     Minion: data.minion,
     Sector: data.sector,
+    Subject: data.subject || "",
+    Task: data.task || "",
     Status: "Enslaved",
     "Impact(1-3)": data.impact,
+    "Survival Mode Required": "",
+    "Quest Status": "",
   };
   for (const stat of statNames) {
     valueMap[stat] = statFormula(stat);

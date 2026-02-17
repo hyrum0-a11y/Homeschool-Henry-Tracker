@@ -37,6 +37,13 @@ async function main() {
   });
   const sheets = google.sheets({ version: "v4", auth });
 
+  // Read header row to find stat column positions dynamically
+  const headerRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Sectors!1:1",
+  });
+  const headers = (headerRes.data.values || [[]])[0];
+
   // Find last row with data in Sectors column A
   const colA = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -45,11 +52,22 @@ async function main() {
   const lastRow = colA.data.values ? colA.data.values.length : 1;
   const dataRows = lastRow - 1; // excluding header
   console.log(`Found ${dataRows} data rows in Sectors sheet.`);
+  console.log(`Headers: ${headers.join(", ")}`);
 
   if (dataRows < 1) {
     console.log("No data rows found. Nothing to update.");
     return;
   }
+
+  // Find stat columns by header name — no hardcoded column letters
+  const statNames = ["INTELLIGENCE", "STAMINA", "TEMPO", "REPUTATION"];
+  const statCols = statNames.map((name) => {
+    const idx = headers.indexOf(name);
+    if (idx === -1) throw new Error(`Column "${name}" not found in Sectors headers`);
+    return { name, idx, letter: String.fromCharCode(65 + idx) };
+  });
+
+  console.log(`Stat columns: ${statCols.map((c) => `${c.name}=${c.letter}`).join(", ")}`);
 
   // Build fully header-based formulas for rows 2..lastRow
   // Every column is found by MATCH on header name — no column letters for data.
@@ -60,27 +78,27 @@ async function main() {
   //   INDEX(Definitions!$A:$Z, , MATCH("Sector", Definitions!$1:$1, 0)) ← Sector col in Definitions
   //   MATCH("INTELLIGENCE", Definitions!$1:$1, 0)                   ← target stat col in Definitions
   //
-  const statNames = ["INTELLIGENCE", "STAMINA", "TEMPO", "REPUTATION"];
-  const formulas = [];
-  for (let row = 2; row <= lastRow; row++) {
-    formulas.push(
-      statNames.map(
-        (stat) =>
-          `=INDEX($A:$Z,ROW(),MATCH("Impact(1-3)",$1:$1,0))*INDEX(Definitions!$A:$Z,MATCH(INDEX($A:$Z,ROW(),MATCH("Sector",$1:$1,0)),INDEX(Definitions!$A:$Z,,MATCH("Sector",Definitions!$1:$1,0)),0),MATCH("${stat}",Definitions!$1:$1,0))`
-      )
-    );
+  // Write each stat column independently (so they land in the right place regardless of order)
+  for (const col of statCols) {
+    const formulas = [];
+    for (let row = 2; row <= lastRow; row++) {
+      formulas.push([
+        `=INDEX($A:$Z,ROW(),MATCH("Impact(1-3)",$1:$1,0))*INDEX(Definitions!$A:$Z,MATCH(INDEX($A:$Z,ROW(),MATCH("Sector",$1:$1,0)),INDEX(Definitions!$A:$Z,,MATCH("Sector",Definitions!$1:$1,0)),0),MATCH("${col.name}",Definitions!$1:$1,0))`,
+      ]);
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Sectors!${col.letter}2:${col.letter}${lastRow}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: formulas },
+    });
+
+    console.log(`  Updated ${col.name} formulas in column ${col.letter} (rows 2-${lastRow}).`);
   }
 
-  // Write formulas to E2:H{lastRow}
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `Sectors!E2:H${lastRow}`,
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: formulas },
-  });
-
-  console.log(`Updated formulas in Sectors!E2:H${lastRow} to fully header-based format.`);
-  console.log("All column references now use MATCH on header names — no column letters.");
+  console.log(`\nUpdated all stat formulas to fully header-based format.`);
+  console.log("Stat columns found dynamically by name — safe to reorder or add columns.");
   console.log("Verify in Google Sheets that the values are unchanged.");
 }
 
