@@ -3400,26 +3400,22 @@ app.get("/progress", async (req, res) => {
       return svg;
     }
 
-    // SVG sparkline bar builder with title and y-axis label
-    function buildSparkBars(series, color, maxOverride, title, yLabel) {
+    // SVG sparkline bar builder with prominent title (no y-axis label, relative scaling)
+    function buildSparkBars(series, color, title) {
       const w = 220;
       const h = 80;
-      const padL = yLabel ? 18 : 0;
-      const padT = title ? 14 : 0;
-      const plotW = w - padL;
+      const padT = title ? 18 : 0;
+      const plotW = w;
       const plotH = h - padT;
-      const maxV = maxOverride != null ? maxOverride : Math.max(...series, 1);
+      const maxV = Math.max(...series, 1);
       const barW = plotW / series.length;
       let svg = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="display:block;margin:6px auto 0;max-width:${w}px;">`;
       if (title) {
-        svg += `<text x="${padL + plotW / 2}" y="10" fill="${color}" font-size="7" text-anchor="middle" font-family="'Courier New',monospace" letter-spacing="1.5" opacity="0.9">${title}</text>`;
-      }
-      if (yLabel) {
-        svg += `<text x="5" y="${padT + plotH / 2}" fill="#555" font-size="6" text-anchor="middle" font-family="'Courier New',monospace" transform="rotate(-90, 5, ${padT + plotH / 2})">${yLabel}</text>`;
+        svg += `<text x="${plotW / 2}" y="13" fill="${color}" font-size="9" font-weight="bold" text-anchor="middle" font-family="'Courier New',monospace" letter-spacing="2" style="text-shadow:0 0 6px ${color};">${title}</text>`;
       }
       for (let i = 0; i < series.length; i++) {
         const barH = maxV > 0 ? (series[i] / maxV) * plotH : 0;
-        const x = padL + i * barW;
+        const x = i * barW;
         const y = padT + plotH - barH;
         const opacity = i === series.length - 1 ? 1 : 0.5;
         svg += `<rect x="${x}" y="${y}" width="${Math.max(barW - 0.5, 1)}" height="${barH}" fill="${color}" opacity="${opacity}" rx="0.5"><title>${days30[i]}: ${series[i]}</title></rect>`;
@@ -3867,34 +3863,22 @@ app.get("/progress", async (req, res) => {
 
         <div class="summary-grid">
             <div class="summary-card">
-                <div class="summary-value" style="color:#00ff9d;">${totalEnslaved}</div>
-                <div class="summary-label">MINIONS ENSLAVED</div>
-                ${buildSparkBars(enslavedSeries, "#00ff9d", null, "MINIONS ENSLAVED", "COUNT")}
+                ${buildSparkBars(enslavedSeries, "#00ff9d", "MINIONS ENSLAVED")}
             </div>
             <div class="summary-card">
-                <div class="summary-value" style="color:#ffea00;">${overallPct}%</div>
-                <div class="summary-label">OVERALL CONQUEST</div>
-                ${buildSparkBars(conquestSeries, "#ffea00", 100, "OVERALL CONQUEST", "%")}
+                ${buildSparkBars(conquestSeries, "#ffea00", "OVERALL CONQUEST")}
             </div>
             <div class="summary-card">
-                <div class="summary-value" style="color:#ff6600;">${completedBosses.length}/${totalBosses}</div>
-                <div class="summary-label">BOSSES CONQUERED</div>
-                ${buildSparkBars(bossSeries, "#ff6600", totalBosses, "BOSSES CONQUERED", "COUNT")}
+                ${buildSparkBars(bossSeries, "#ff6600", "BOSSES CONQUERED")}
             </div>
             <div class="summary-card">
-                <div class="summary-value" style="color:#ff4444;">${completedSurvival}/${survivalBosses.length}</div>
-                <div class="summary-label">GUARDIANS DEFEATED</div>
-                ${buildSparkBars(guardianSeries, "#ff4444", survivalBosses.length, "GUARDIANS DEFEATED", "COUNT")}
+                ${buildSparkBars(guardianSeries, "#ff4444", "GUARDIANS DEFEATED")}
             </div>
             <div class="summary-card">
-                <div class="summary-value" style="color:#ff00ff;">${totalEnslaved}</div>
-                <div class="summary-label">MINIONS ENSLAVED</div>
-                ${buildSparkBars(enslavedSeries, "#ff00ff", null, "MINIONS ENSLAVED", "COUNT")}
+                ${buildSparkBars(enslavedSeries, "#ff00ff", "MINIONS ENSLAVED")}
             </div>
             <div class="summary-card">
-                <div class="summary-value" style="color:#00f2ff;">${questInProgressCurrent}</div>
-                <div class="summary-label">QUESTS IN PROGRESS</div>
-                ${buildSparkBars(questInProgressSeries, "#00f2ff", null, "QUESTS IN PROGRESS", "COUNT")}
+                ${buildSparkBars(questInProgressSeries, "#00f2ff", "QUESTS IN PROGRESS")}
             </div>
         </div>
 
