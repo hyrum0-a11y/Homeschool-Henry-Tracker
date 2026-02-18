@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.4.0] - 2025-02-18
+
+### Added
+- **Progress Report page** (`/progress`) — New accomplishments dashboard showing summary cards, stat level bars, sector conquest donuts, boss conquest chart, survival mode progress, and a timeline of completed quests. Linked from HUD via center bottom FAB button
+- **Manual Entry page** (`/admin/manual`) — Parents can add new objectives (minions) directly from the admin panel without opening Google Sheets. Supports sector/boss/subject autocomplete from existing data, task description, impact level, and optional "add to quest board" toggle
+- **Guardian badge on Henry's Army** — Minions belonging to survival-mode bosses are highlighted with a red shield icon, red text, and subtle red background tint
+- **Audit trail for quest abandonment** — Instead of deleting abandoned quests, they are now marked "Abandoned" with the parent's name and date recorded in the Quests sheet
+
+### Changed
+- **Admin panel** — "Manual Entry" and "Progress Reports" cards now active and linked
+- **Quest board** — "Abandoned" status added with dimmed card styling
+
 ## [2.3.0] - 2025-02-18
 
 ### Added

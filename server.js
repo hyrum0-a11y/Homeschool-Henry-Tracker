@@ -1112,6 +1112,33 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         box-shadow: 0 0 25px rgba(0, 255, 157, 0.6);
     }
 
+    /* Progress floating action button */
+    .progress-fab {
+        position: fixed;
+        bottom: 20px;
+        left: 50%;
+        transform: translateX(-50%);
+        text-decoration: none;
+        background: #0a0b10;
+        border: 2px solid #ffea00;
+        color: #ffea00;
+        padding: 10px 18px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.8em;
+        font-weight: bold;
+        letter-spacing: 2px;
+        text-transform: uppercase;
+        z-index: 1000;
+        box-shadow: 0 0 15px rgba(255, 234, 0, 0.3), 0 0 30px rgba(255, 234, 0, 0.1);
+        transition: all 0.3s;
+        white-space: nowrap;
+    }
+    .progress-fab:hover {
+        background: #ffea00;
+        color: #0a0b10;
+        box-shadow: 0 0 25px rgba(255, 234, 0, 0.6);
+    }
+
     /* Quest floating action button */
     .quest-fab {
         position: fixed;
@@ -1415,6 +1442,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         </div>
     </div>
     <a href="/army" class="army-fab">[[ARMY_LINK]]</a>
+    <a href="/progress" class="progress-fab">&#x1F4CA; Progress</a>
     <a href="/quests" class="quest-fab">[[QUEST_LINK]]</a>
 </body>
 </html>`;
@@ -2424,6 +2452,7 @@ function buildQuestBoardPage(questRows, activeCount, totalCount) {
     .quest-card:hover { border-color: #00f2ff; }
     .quest-card[data-status="Approved"] { border-color: rgba(0, 255, 157, 0.3); opacity: 0.7; }
     .quest-card[data-status="Rejected"] { border-color: rgba(255, 0, 68, 0.3); opacity: 0.5; }
+    .quest-card[data-status="Abandoned"] { border-color: rgba(85, 85, 85, 0.3); opacity: 0.4; }
     .quest-header {
         display: flex;
         justify-content: space-between;
@@ -2535,6 +2564,7 @@ function buildQuestBoardPage(questRows, activeCount, totalCount) {
             alert('Quest deletion requires parent permission.');
             return false;
         }
+        form.querySelector('input[name="parentName"]').value = parentOk.trim();
         return true;
     }
     (function() {
@@ -2737,7 +2767,7 @@ app.post("/quest/submit", async (req, res) => {
 
 app.post("/quest/remove", async (req, res) => {
   try {
-    const { questId } = req.body;
+    const { questId, parentName } = req.body;
     if (!questId) return res.status(400).send("Missing questId");
 
     const sheets = await getSheets();
@@ -2750,9 +2780,11 @@ app.post("/quest/remove", async (req, res) => {
 
     const headers = rows[0];
     const idCol = headers.indexOf("Quest ID");
+    const statusCol = headers.indexOf("Status");
     const bossCol = headers.indexOf("Boss");
     const minionCol = headers.indexOf("Minion");
     const sectorCol = headers.indexOf("Sector");
+    const dateCol = headers.indexOf("Date Completed");
 
     let targetRowIdx = -1;
     let questRow = null;
@@ -2765,7 +2797,7 @@ app.post("/quest/remove", async (req, res) => {
     }
     if (targetRowIdx === -1) return res.status(404).send("Quest not found");
 
-    // Clear Quest Status on Sectors before deleting the quest row
+    // Clear Quest Status on Sectors
     const qBoss = questRow[bossCol];
     const qMinion = questRow[minionCol];
     const qSector = questRow[sectorCol];
@@ -2773,29 +2805,20 @@ app.post("/quest/remove", async (req, res) => {
       await updateSectorsQuestStatus(sheets, qSector, qBoss, qMinion, "");
     }
 
-    // Get sheet ID for Quests tab
-    const meta = await sheets.spreadsheets.get({
-      spreadsheetId: SPREADSHEET_ID,
-      fields: "sheets.properties",
-    });
-    const questSheet = meta.data.sheets.find((s) => s.properties.title === "Quests");
-    if (!questSheet) return res.status(404).send("Quests sheet not found");
+    // Instead of deleting, mark as Abandoned with parent name and date for audit trail
+    const now = new Date().toISOString().slice(0, 10);
+    const parentNote = parentName ? `Abandoned by: ${parentName}` : "Abandoned";
+    // Update Status to "Abandoned" and Date Completed to the audit note
+    const updatedRow = [...questRow];
+    while (updatedRow.length < headers.length) updatedRow.push("");
+    updatedRow[statusCol] = "Abandoned";
+    updatedRow[dateCol] = `${now} | ${parentNote}`;
 
-    // Delete the row
-    await sheets.spreadsheets.batchUpdate({
+    await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      requestBody: {
-        requests: [{
-          deleteDimension: {
-            range: {
-              sheetId: questSheet.properties.sheetId,
-              dimension: "ROWS",
-              startIndex: targetRowIdx, // 0-based, header is row 0
-              endIndex: targetRowIdx + 1,
-            },
-          },
-        }],
-      },
+      range: `Quests!A${targetRowIdx + 1}:${String.fromCharCode(64 + headers.length)}${targetRowIdx + 1}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [updatedRow] },
     });
 
     res.redirect("/quests");
@@ -2815,8 +2838,8 @@ app.get("/quests", async (req, res) => {
     const definitions = parseTable(defRes.data.values);
     const artifactOptions = getArtifactOptions(definitions);
 
-    const statusOrder = ["Active", "Submitted", "Approved", "Rejected"];
-    const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Approved: "#00ff9d", Rejected: "#ff0044" };
+    const statusOrder = ["Active", "Submitted", "Approved", "Rejected", "Abandoned"];
+    const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Approved: "#00ff9d", Rejected: "#ff0044", Abandoned: "#555" };
 
     const sorted = [...quests].sort((a, b) =>
       statusOrder.indexOf(a["Status"]) - statusOrder.indexOf(b["Status"])
@@ -2829,6 +2852,7 @@ app.get("/quests", async (req, res) => {
       const abandonBtn = isActive
         ? `<form method="POST" action="/quest/remove" style="margin:0;" onsubmit="return confirmAbandon(this)">
              <input type="hidden" name="questId" value="${q["Quest ID"]}">
+             <input type="hidden" name="parentName" value="">
              <button type="submit" class="quest-abandon-btn" title="Abandon quest">X</button>
            </form>`
         : "";
@@ -2898,6 +2922,22 @@ app.get("/army", async (req, res) => {
     const commandCenter = parseTable(ccRaw.values);
     const enslaved = allMinions.filter((r) => r["Status"] === "Enslaved");
 
+    // Detect survival bosses
+    let survivalCol = null;
+    if (allMinions.length > 0) {
+      survivalCol = Object.keys(allMinions[0]).find((k) => k.toLowerCase().includes("survival"));
+    }
+    const survivalBossKeys = new Set();
+    if (survivalCol) {
+      for (const r of allMinions) {
+        if ((r[survivalCol] || "").toUpperCase() === "X") {
+          survivalBossKeys.add(`${r["Sector"]}|${r["Boss"]}`);
+        }
+      }
+    }
+
+    const shieldSvg = `<svg width="12" height="14" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:2px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg>`;
+
     const totals = {
       intel: getStat(commandCenter, "Intel").totalPossible,
       stamina: getStat(commandCenter, "Stamina").totalPossible,
@@ -2924,8 +2964,12 @@ app.get("/army", async (req, res) => {
         const nTmp = norm(m["TEMPO"], totals.tempo);
         const nRep = norm(m["REPUTATION"], totals.rep);
         const nTotal = (parseFloat(nInt) + parseFloat(nSta) + parseFloat(nTmp) + parseFloat(nRep)).toFixed(1);
-        rows += `<tr>
-          <td>${escHtml(m["Boss"])}</td>
+        const isSurvival = survivalBossKeys.has(`${sector}|${m["Boss"]}`);
+        const bossCell = isSurvival
+          ? `<td class="survival-boss-cell">${shieldSvg} ${escHtml(m["Boss"])}</td>`
+          : `<td>${escHtml(m["Boss"])}</td>`;
+        rows += `<tr${isSurvival ? ' class="survival-row"' : ''}>
+          ${bossCell}
           <td>${escHtml(m["Minion"])}</td>
           <td style="color:#00f2ff">${nInt}</td>
           <td style="color:#00ff9d">${nSta}</td>
@@ -3021,6 +3065,9 @@ app.get("/army", async (req, res) => {
     }
     td { padding: 6px; border-bottom: 1px solid #1a1d26; }
     tr:hover td { background: rgba(0, 255, 157, 0.05); }
+    tr.survival-row { background: rgba(255, 68, 68, 0.04); }
+    tr.survival-row:hover td { background: rgba(255, 68, 68, 0.08); }
+    .survival-boss-cell { color: #ff4444; text-shadow: 0 0 6px rgba(255, 68, 68, 0.3); }
     .empty-army {
         text-align: center;
         color: #555;
@@ -3073,14 +3120,487 @@ app.get("/army", async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Progress & Accomplishments Page
+// ---------------------------------------------------------------------------
+app.get("/progress", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const batchRes = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId: SPREADSHEET_ID,
+      ranges: ["Sectors", "Command_Center", "Definitions", "Quests"],
+    });
+    const [sectorsRaw, ccRaw, defRaw, questsRaw] = batchRes.data.valueRanges;
+    const allMinions = parseTable(sectorsRaw.values || []);
+    const commandCenter = parseTable(ccRaw.values || []);
+    const definitions = parseTable(defRaw.values || []);
+    const quests = parseTable(questsRaw.values || []);
+
+    // Stats
+    const intel = getStat(commandCenter, "Intel");
+    const stamina = getStat(commandCenter, "Stamina");
+    const tempo = getStat(commandCenter, "Tempo");
+    const reputation = getStat(commandCenter, "Reputation");
+    const confidence = getStat(commandCenter, "Confidence");
+
+    // Survival info
+    let survivalCol = null;
+    if (allMinions.length > 0) {
+      survivalCol = Object.keys(allMinions[0]).find((k) => k.toLowerCase().includes("survival"));
+    }
+    const survivalBossKeys = new Set();
+    if (survivalCol) {
+      for (const r of allMinions) {
+        if ((r[survivalCol] || "").toUpperCase() === "X") {
+          survivalBossKeys.add(`${r["Sector"]}|${r["Boss"]}`);
+        }
+      }
+    }
+
+    // Boss conquest stats
+    const bossMap = {};
+    for (const m of allMinions) {
+      const key = `${m["Sector"]}|${m["Boss"]}`;
+      if (!bossMap[key]) bossMap[key] = { sector: m["Sector"], boss: m["Boss"], total: 0, enslaved: 0, isSurvival: survivalBossKeys.has(key) };
+      bossMap[key].total++;
+      if (m["Status"] === "Enslaved") bossMap[key].enslaved++;
+    }
+    const allBosses = Object.values(bossMap);
+    const completedBosses = allBosses.filter((b) => b.enslaved >= b.total);
+    const totalBosses = allBosses.length;
+    const survivalBosses = allBosses.filter((b) => b.isSurvival);
+    const completedSurvival = survivalBosses.filter((b) => b.enslaved >= b.total).length;
+
+    // Sector summary
+    const sectorStats = {};
+    for (const m of allMinions) {
+      const s = m["Sector"] || "Unknown";
+      if (!sectorStats[s]) sectorStats[s] = { total: 0, enslaved: 0, engaged: 0, locked: 0 };
+      sectorStats[s].total++;
+      if (m["Status"] === "Enslaved") sectorStats[s].enslaved++;
+      else if (m["Status"] === "Engaged") sectorStats[s].engaged++;
+      else sectorStats[s].locked++;
+    }
+
+    // Quest stats
+    const approvedQuests = quests.filter((q) => q["Status"] === "Approved");
+    const activeQuests = quests.filter((q) => q["Status"] === "Active");
+    const submittedQuests = quests.filter((q) => q["Status"] === "Submitted");
+    const totalEnslaved = allMinions.filter((m) => m["Status"] === "Enslaved").length;
+    const totalMinions = allMinions.length;
+    const overallPct = totalMinions > 0 ? Math.round((totalEnslaved / totalMinions) * 100) : 0;
+
+    // Timeline entries (approved quests with dates)
+    const timelineEntries = approvedQuests
+      .filter((q) => q["Date Completed"])
+      .map((q) => ({
+        date: q["Date Completed"],
+        boss: q["Boss"],
+        minion: q["Minion"],
+        sector: q["Sector"],
+        type: q["Proof Type"] || "",
+      }))
+      .sort((a, b) => b.date.localeCompare(a.date)); // newest first
+
+    // Build stat level progress bars (SVG bar chart)
+    const statData = [
+      { name: "INTEL", value: intel.value, level: intel.level, color: "#00f2ff", max: intel.totalPossible },
+      { name: "STAMINA", value: stamina.value, level: stamina.level, color: "#00ff9d", max: stamina.totalPossible },
+      { name: "TEMPO", value: tempo.value, level: tempo.level, color: "#ff00ff", max: tempo.totalPossible },
+      { name: "REPUTATION", value: reputation.value, level: reputation.level, color: "#ff8800", max: reputation.totalPossible },
+      { name: "CONFIDENCE", value: confidence.value, level: confidence.level, color: "#ffea00", max: confidence.totalPossible },
+    ];
+
+    let statBarsHtml = "";
+    for (const s of statData) {
+      const pct = s.max > 0 ? Math.min(100, (s.value / s.max) * 100) : 0;
+      statBarsHtml += `
+        <div class="prog-stat">
+          <div class="prog-stat-label" style="color:${s.color};">${s.name}: ${s.level}</div>
+          <div class="prog-stat-bar"><div class="prog-stat-fill" style="width:${pct.toFixed(1)}%;background:${s.color};"></div></div>
+          <div class="prog-stat-pct" style="color:${s.color};">${pct.toFixed(0)}%</div>
+        </div>`;
+    }
+
+    // Sector donut chart data (pure CSS)
+    let sectorChartHtml = "";
+    const sectorNames = Object.keys(sectorStats).sort();
+    const sectorColors = ["#00f2ff", "#00ff9d", "#ff00ff", "#ff8800", "#ffea00", "#ff4444", "#aa88ff", "#88ff88"];
+    for (let i = 0; i < sectorNames.length; i++) {
+      const s = sectorNames[i];
+      const stat = sectorStats[s];
+      const pct = stat.total > 0 ? Math.round((stat.enslaved / stat.total) * 100) : 0;
+      const color = sectorColors[i % sectorColors.length];
+      sectorChartHtml += `
+        <div class="sector-prog-item">
+          <div class="sector-prog-ring" style="background: conic-gradient(${color} 0% ${pct}%, #1a1d26 ${pct}% 100%);"></div>
+          <div class="sector-prog-label">${escHtml(s)}</div>
+          <div class="sector-prog-pct" style="color:${color};">${pct}%</div>
+          <div class="sector-prog-detail">${stat.enslaved}/${stat.total}</div>
+        </div>`;
+    }
+
+    // Boss conquest bars (top bosses by completion)
+    const sortedBosses = [...allBosses].sort((a, b) => {
+      const aPct = a.total > 0 ? a.enslaved / a.total : 0;
+      const bPct = b.total > 0 ? b.enslaved / b.total : 0;
+      return bPct - aPct;
+    });
+    let bossConquestHtml = "";
+    for (const b of sortedBosses.slice(0, 15)) {
+      const pct = b.total > 0 ? Math.round((b.enslaved / b.total) * 100) : 0;
+      const barColor = pct >= 100 ? "#00ff9d" : b.isSurvival ? "#ff4444" : "#ff6600";
+      const shieldMark = b.isSurvival ? `<span style="color:#ff4444;" title="Survival Guardian">&#x1F6E1;</span> ` : "";
+      bossConquestHtml += `
+        <div class="boss-prog-row">
+          <span class="boss-prog-name">${shieldMark}${escHtml(b.boss)}</span>
+          <div class="boss-prog-bar"><div class="boss-prog-fill" style="width:${pct}%;background:${barColor};"></div></div>
+          <span class="boss-prog-pct">${pct}%</span>
+        </div>`;
+    }
+
+    // Survival ring progress
+    let survivalHtml = "";
+    if (survivalBosses.length > 0) {
+      for (const b of survivalBosses.sort((a, b) => {
+        const aPct = a.total > 0 ? a.enslaved / a.total : 0;
+        const bPct = b.total > 0 ? b.enslaved / b.total : 0;
+        return bPct - aPct;
+      })) {
+        const pct = b.total > 0 ? Math.round((b.enslaved / b.total) * 100) : 0;
+        const barColor = pct >= 100 ? "#00ff9d" : "#ff4444";
+        survivalHtml += `
+          <div class="boss-prog-row">
+            <span class="boss-prog-name">&#x1F6E1; ${escHtml(b.boss)}</span>
+            <div class="boss-prog-bar"><div class="boss-prog-fill" style="width:${pct}%;background:${barColor};"></div></div>
+            <span class="boss-prog-pct">${pct}%</span>
+          </div>`;
+      }
+    }
+
+    // Timeline
+    let timelineHtml = "";
+    if (timelineEntries.length === 0) {
+      timelineHtml = `<div class="timeline-empty">NO COMPLETED QUESTS YET. START CONQUERING!</div>`;
+    } else {
+      for (const e of timelineEntries.slice(0, 30)) {
+        timelineHtml += `
+          <div class="timeline-entry">
+            <div class="timeline-date">${escHtml(e.date)}</div>
+            <div class="timeline-dot"></div>
+            <div class="timeline-content">
+              <span class="timeline-minion">${escHtml(e.minion)}</span>
+              <span class="timeline-arrow">&rarr;</span>
+              <span class="timeline-boss">${escHtml(e.boss)}</span>
+              <span class="timeline-sector">${escHtml(e.sector)}</span>
+              ${e.type ? `<span class="timeline-type">${escHtml(e.type)}</span>` : ''}
+            </div>
+          </div>`;
+      }
+    }
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Progress Report - Sovereign HUD</title>
+    <style>
+    body {
+        background: #0a0b10;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        padding: 20px;
+        text-transform: uppercase;
+        overflow-x: hidden;
+    }
+    .hud-container {
+        max-width: 960px;
+        margin: auto;
+    }
+    .back-link { color: #00f2ff; text-decoration: none; font-size: 0.75em; letter-spacing: 2px; }
+    .back-link:hover { text-decoration: underline; }
+    h1 {
+        text-align: center;
+        color: #ffea00;
+        text-shadow: 2px 2px #ff00ff;
+        letter-spacing: 4px;
+        border-bottom: 2px solid #ffea00;
+        padding-bottom: 10px;
+    }
+    .progress-subtitle {
+        text-align: center;
+        color: #888;
+        font-size: 0.75em;
+        letter-spacing: 3px;
+        margin-bottom: 30px;
+    }
+
+    /* Summary cards */
+    .summary-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-bottom: 30px;
+    }
+    .summary-card {
+        border: 1px solid rgba(0, 242, 255, 0.2);
+        background: rgba(0, 242, 255, 0.03);
+        border-radius: 6px;
+        padding: 15px;
+        text-align: center;
+    }
+    .summary-value {
+        font-size: 1.8em;
+        font-weight: bold;
+        margin-bottom: 5px;
+    }
+    .summary-label {
+        font-size: 0.65em;
+        color: #888;
+        letter-spacing: 2px;
+    }
+
+    /* Sections */
+    .progress-section {
+        border: 1px solid rgba(0, 242, 255, 0.15);
+        background: rgba(0, 242, 255, 0.02);
+        border-radius: 8px;
+        padding: 20px;
+        margin-bottom: 25px;
+    }
+    .progress-section h2 {
+        color: #ff00ff;
+        font-size: 0.9em;
+        letter-spacing: 3px;
+        margin: 0 0 15px 0;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(255, 0, 255, 0.3);
+    }
+
+    /* Stat bars */
+    .prog-stat {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-bottom: 10px;
+    }
+    .prog-stat-label {
+        width: 220px;
+        font-size: 0.75em;
+        font-weight: bold;
+        letter-spacing: 1px;
+        flex-shrink: 0;
+    }
+    .prog-stat-bar {
+        flex: 1;
+        height: 14px;
+        background: #1a1d26;
+        border-radius: 2px;
+        overflow: hidden;
+    }
+    .prog-stat-fill {
+        height: 100%;
+        border-radius: 2px;
+        transition: width 0.5s;
+    }
+    .prog-stat-pct {
+        width: 40px;
+        text-align: right;
+        font-size: 0.75em;
+        font-weight: bold;
+    }
+
+    /* Sector donut rings */
+    .sector-prog-grid {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+        gap: 15px;
+        text-align: center;
+    }
+    .sector-prog-item { display: flex; flex-direction: column; align-items: center; }
+    .sector-prog-ring {
+        width: 70px; height: 70px; border-radius: 50%;
+        display: flex; align-items: center; justify-content: center;
+        position: relative;
+    }
+    .sector-prog-ring::after {
+        content: '';
+        position: absolute;
+        width: 40px; height: 40px;
+        background: #0a0b10;
+        border-radius: 50%;
+    }
+    .sector-prog-label { font-size: 0.6em; color: #888; margin-top: 6px; letter-spacing: 1px; }
+    .sector-prog-pct { font-size: 0.85em; font-weight: bold; }
+    .sector-prog-detail { font-size: 0.6em; color: #555; }
+
+    /* Boss conquest bars */
+    .boss-prog-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+    }
+    .boss-prog-name {
+        width: 180px;
+        font-size: 0.7em;
+        color: #ccc;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        flex-shrink: 0;
+    }
+    .boss-prog-bar {
+        flex: 1;
+        height: 10px;
+        background: #1a1d26;
+        border-radius: 2px;
+        overflow: hidden;
+    }
+    .boss-prog-fill {
+        height: 100%;
+        border-radius: 2px;
+    }
+    .boss-prog-pct {
+        width: 35px;
+        text-align: right;
+        font-size: 0.7em;
+        color: #888;
+    }
+
+    /* Timeline */
+    .timeline {
+        position: relative;
+        padding-left: 20px;
+    }
+    .timeline::before {
+        content: '';
+        position: absolute;
+        left: 8px;
+        top: 0;
+        bottom: 0;
+        width: 2px;
+        background: rgba(255, 0, 255, 0.3);
+    }
+    .timeline-entry {
+        display: flex;
+        align-items: flex-start;
+        gap: 12px;
+        margin-bottom: 12px;
+        position: relative;
+    }
+    .timeline-dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: #ff00ff;
+        flex-shrink: 0;
+        margin-top: 3px;
+        box-shadow: 0 0 6px rgba(255, 0, 255, 0.5);
+        position: absolute;
+        left: -16px;
+    }
+    .timeline-date {
+        font-size: 0.65em;
+        color: #555;
+        width: 80px;
+        flex-shrink: 0;
+    }
+    .timeline-content { font-size: 0.8em; }
+    .timeline-minion { color: #00f2ff; font-weight: bold; }
+    .timeline-arrow { color: #ff00ff; margin: 0 4px; }
+    .timeline-boss { color: #ff6600; }
+    .timeline-sector { color: #888; font-size: 0.85em; margin-left: 6px; }
+    .timeline-type { color: #ffea00; font-size: 0.8em; margin-left: 6px; border: 1px solid rgba(255, 234, 0, 0.3); padding: 1px 5px; }
+    .timeline-empty { text-align: center; color: #555; padding: 20px; }
+
+    @media (max-width: 600px) {
+        body { padding: 10px; }
+        .prog-stat-label { width: 140px; font-size: 0.65em; }
+        .boss-prog-name { width: 120px; }
+        .summary-grid { grid-template-columns: repeat(2, 1fr); }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <a class="back-link" href="/">&lt; BACK TO HUD</a>
+        <h1>&#x1F4CA; Progress Report</h1>
+        <div class="progress-subtitle">STUDENT ACCOMPLISHMENTS &amp; GROWTH TRACKER</div>
+
+        <div class="summary-grid">
+            <div class="summary-card">
+                <div class="summary-value" style="color:#00ff9d;">${totalEnslaved}</div>
+                <div class="summary-label">MINIONS ENSLAVED</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-value" style="color:#ffea00;">${overallPct}%</div>
+                <div class="summary-label">OVERALL CONQUEST</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-value" style="color:#ff6600;">${completedBosses.length}/${totalBosses}</div>
+                <div class="summary-label">BOSSES CONQUERED</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-value" style="color:#ff4444;">${completedSurvival}/${survivalBosses.length}</div>
+                <div class="summary-label">GUARDIANS DEFEATED</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-value" style="color:#ff00ff;">${approvedQuests.length}</div>
+                <div class="summary-label">QUESTS COMPLETED</div>
+            </div>
+            <div class="summary-card">
+                <div class="summary-value" style="color:#00f2ff;">${activeQuests.length + submittedQuests.length}</div>
+                <div class="summary-label">QUESTS IN PROGRESS</div>
+            </div>
+        </div>
+
+        <div class="progress-section">
+            <h2>&#x2694; STATUS LEVELS</h2>
+            ${statBarsHtml}
+        </div>
+
+        <div class="progress-section">
+            <h2>&#x1F30D; SECTOR CONQUEST</h2>
+            <div class="sector-prog-grid">
+                ${sectorChartHtml}
+            </div>
+        </div>
+
+        <div class="progress-section">
+            <h2>&#x1F6E1; SURVIVAL MODE PROGRESS (${completedSurvival}/${survivalBosses.length} GUARDIANS)</h2>
+            ${survivalHtml || '<div style="text-align:center;color:#555;padding:10px;">NO SURVIVAL BOSSES FOUND</div>'}
+        </div>
+
+        <div class="progress-section">
+            <h2>&#x1F451; BOSS CONQUEST (TOP 15)</h2>
+            ${bossConquestHtml}
+        </div>
+
+        <div class="progress-section">
+            <h2>&#x1F4C5; ACCOMPLISHMENT TIMELINE</h2>
+            <div class="timeline">
+                ${timelineHtml}
+            </div>
+        </div>
+    </div>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("Progress page error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Admin: Landing page
 // ---------------------------------------------------------------------------
 function buildAdminPage() {
   const functions = [
     { id: "import", title: "PHOTO IMPORT", desc: "Upload lesson photos for AI classification and auto-import to the tracker.", href: "/admin/import", active: true },
     { id: "quests", title: "QUEST APPROVAL", desc: "Review and approve completed quests submitted by Henry.", href: "/admin/quests", active: true },
-    { id: "manual", title: "MANUAL ENTRY", desc: "Directly add or edit minions in the Sectors sheet.", href: "#", active: false },
-    { id: "reports", title: "PROGRESS REPORTS", desc: "Generate weekly and monthly stat summaries.", href: "#", active: false },
+    { id: "manual", title: "MANUAL ENTRY", desc: "Add new objectives (minions) directly without opening Google Sheets.", href: "/admin/manual", active: true },
+    { id: "reports", title: "PROGRESS REPORTS", desc: "View student progress, accomplishments, and charts.", href: "/progress", active: true },
   ];
 
   const cards = functions.map((f) => {
@@ -3478,6 +3998,325 @@ app.post("/admin/quests/sync", async (req, res) => {
   } catch (err) {
     console.error("Quest sync error:", err);
     res.status(500).send(`<pre style="color:red">Error syncing quests: ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Manual Entry page — add new minions without opening Google Sheets
+// ---------------------------------------------------------------------------
+app.get("/admin/manual", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const sectorsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Sectors",
+    });
+    const allMinions = parseTable(sectorsRes.data.values || []);
+
+    // Collect existing sectors and bosses for autocomplete
+    const sectors = [...new Set(allMinions.map((r) => r["Sector"]).filter(Boolean))].sort();
+    const bosses = [...new Set(allMinions.map((r) => r["Boss"]).filter(Boolean))].sort();
+    const subjects = [...new Set(allMinions.map((r) => r["Subject"]).filter(Boolean))].sort();
+
+    const sectorOptions = sectors.map((s) => `<option value="${escHtml(s)}">`).join("");
+    const bossOptions = bosses.map((b) => `<option value="${escHtml(b)}">`).join("");
+    const subjectOptions = subjects.map((s) => `<option value="${escHtml(s)}">`).join("");
+
+    const successMsg = req.query.success === "1"
+      ? `<div class="success-msg">&#x2714; MINION ADDED SUCCESSFULLY!</div>` : "";
+    const addedToQuest = req.query.quest === "1"
+      ? `<div class="success-msg" style="color:#ff6600;">&#x2605; ALSO ADDED TO QUEST BOARD</div>` : "";
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Manual Entry - Sovereign HUD</title>
+    <style>
+    body {
+        background: #0a0b10;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        padding: 20px;
+        text-transform: uppercase;
+        overflow-x: hidden;
+    }
+    .hud-container {
+        border: 2px solid #ffea00;
+        padding: 20px;
+        box-shadow: 0 0 15px rgba(255, 234, 0, 0.5);
+        max-width: 700px;
+        margin: auto;
+    }
+    h1 {
+        text-shadow: 2px 2px #ff00ff;
+        border-bottom: 1px solid #ffea00;
+        letter-spacing: 2px;
+        text-align: center;
+        margin-bottom: 5px;
+        color: #ffea00;
+    }
+    .back-link {
+        display: inline-block;
+        color: #00f2ff;
+        text-decoration: none;
+        border: 1px solid #00f2ff;
+        padding: 6px 15px;
+        margin-bottom: 15px;
+        font-size: 0.8em;
+        transition: all 0.2s;
+    }
+    .back-link:hover { background: #00f2ff; color: #0a0b10; }
+    .manual-subtitle {
+        text-align: center;
+        color: #888;
+        font-size: 0.75em;
+        margin-bottom: 25px;
+        letter-spacing: 3px;
+    }
+    .form-group {
+        margin-bottom: 15px;
+    }
+    .form-group label {
+        display: block;
+        font-size: 0.75em;
+        color: #ffea00;
+        letter-spacing: 2px;
+        margin-bottom: 5px;
+    }
+    .form-group input, .form-group select, .form-group textarea {
+        width: 100%;
+        padding: 10px;
+        background: #1a1d26;
+        border: 1px solid #333;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        font-size: 0.85em;
+        box-sizing: border-box;
+    }
+    .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+        outline: none;
+        border-color: #ffea00;
+        box-shadow: 0 0 5px rgba(255, 234, 0, 0.3);
+    }
+    .form-group textarea { resize: vertical; min-height: 60px; text-transform: none; }
+    .form-group .hint {
+        font-size: 0.6em;
+        color: #555;
+        margin-top: 3px;
+        letter-spacing: 1px;
+        text-transform: none;
+    }
+    .form-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 15px;
+    }
+    .quest-toggle {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        margin-top: 15px;
+        margin-bottom: 20px;
+        padding: 12px;
+        border: 1px solid rgba(255, 102, 0, 0.3);
+        background: rgba(255, 102, 0, 0.05);
+        border-radius: 4px;
+    }
+    .quest-toggle input[type="checkbox"] {
+        width: 20px;
+        height: 20px;
+        accent-color: #ff6600;
+        cursor: pointer;
+    }
+    .quest-toggle label {
+        color: #ff6600;
+        font-size: 0.8em;
+        letter-spacing: 2px;
+        cursor: pointer;
+    }
+    .submit-btn {
+        width: 100%;
+        padding: 14px;
+        background: #ffea00;
+        color: #0a0b10;
+        border: none;
+        font-family: 'Courier New', monospace;
+        font-size: 1em;
+        font-weight: bold;
+        letter-spacing: 3px;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .submit-btn:hover {
+        background: #00ff9d;
+        box-shadow: 0 0 15px rgba(0, 255, 157, 0.5);
+    }
+    .success-msg {
+        text-align: center;
+        color: #00ff9d;
+        font-weight: bold;
+        letter-spacing: 2px;
+        margin-bottom: 15px;
+        padding: 10px;
+        border: 1px solid rgba(0, 255, 157, 0.3);
+        background: rgba(0, 255, 157, 0.05);
+    }
+    .required { color: #ff4444; }
+    @media (max-width: 600px) {
+        body { padding: 10px; }
+        .form-row { grid-template-columns: 1fr; }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <a class="back-link" href="/admin">&lt; BACK TO ADMIN</a>
+        <h1>&#x270F; Manual Entry</h1>
+        <div class="manual-subtitle">ADD NEW OBJECTIVES WITHOUT OPENING GOOGLE SHEETS</div>
+        ${successMsg}${addedToQuest}
+        <form method="POST" action="/admin/manual">
+            <div class="form-row">
+                <div class="form-group">
+                    <label>SECTOR <span class="required">*</span></label>
+                    <input type="text" name="sector" required list="sector-list" placeholder="e.g. Mathematics">
+                    <datalist id="sector-list">${sectorOptions}</datalist>
+                    <div class="hint">Choose an existing sector or type a new one</div>
+                </div>
+                <div class="form-group">
+                    <label>SUBJECT</label>
+                    <input type="text" name="subject" list="subject-list" placeholder="e.g. Algebra">
+                    <datalist id="subject-list">${subjectOptions}</datalist>
+                    <div class="hint">Optional sub-category within the sector</div>
+                </div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>BOSS <span class="required">*</span></label>
+                    <input type="text" name="boss" required list="boss-list" placeholder="e.g. Fractions">
+                    <datalist id="boss-list">${bossOptions}</datalist>
+                    <div class="hint">The topic or skill group this belongs to</div>
+                </div>
+                <div class="form-group">
+                    <label>MINION NAME <span class="required">*</span></label>
+                    <input type="text" name="minion" required placeholder="e.g. Add unlike fractions">
+                    <div class="hint">The specific learning objective</div>
+                </div>
+            </div>
+            <div class="form-group">
+                <label>TASK DESCRIPTION</label>
+                <textarea name="task" placeholder="Describe what the student should do to complete this objective..."></textarea>
+                <div class="hint">Optional — helps the student understand what's expected</div>
+            </div>
+            <div class="form-row">
+                <div class="form-group">
+                    <label>IMPACT (1-3) <span class="required">*</span></label>
+                    <select name="impact" required>
+                        <option value="" disabled selected>Select impact...</option>
+                        <option value="1">1 — Basic</option>
+                        <option value="2">2 — Moderate</option>
+                        <option value="3">3 — Advanced</option>
+                    </select>
+                    <div class="hint">How much does this contribute to stat growth?</div>
+                </div>
+                <div class="form-group">
+                    <label>INITIAL STATUS</label>
+                    <select name="status">
+                        <option value="Engaged" selected>Engaged (in progress)</option>
+                        <option value="Locked">Locked (not started)</option>
+                        <option value="Enslaved">Enslaved (already complete)</option>
+                    </select>
+                    <div class="hint">Default: Engaged</div>
+                </div>
+            </div>
+            <div class="quest-toggle">
+                <input type="checkbox" id="addToQuest" name="addToQuest" value="1">
+                <label for="addToQuest">ALSO ADD TO QUEST BOARD</label>
+            </div>
+            <button type="submit" class="submit-btn">ADD MINION</button>
+        </form>
+    </div>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("Manual entry page error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+app.post("/admin/manual", async (req, res) => {
+  try {
+    const { sector, boss, minion, subject, task, impact, status, addToQuest } = req.body;
+    if (!sector || !boss || !minion || !impact) {
+      return res.status(400).send("Missing required fields: sector, boss, minion, impact");
+    }
+
+    const sheets = await getSheets();
+
+    // Get Sectors headers to build the row in correct order
+    const sectorsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Sectors!1:1",
+    });
+    const headers = sectorsRes.data.values ? sectorsRes.data.values[0] : [];
+    if (headers.length === 0) {
+      return res.status(500).send("Sectors sheet has no headers");
+    }
+
+    const minionStatus = status || "Engaged";
+    const row = buildSectorsRow(headers, {
+      sector,
+      boss,
+      minion,
+      subject: subject || "",
+      task: task || "",
+      impact: parseInt(impact) || 1,
+    });
+
+    // Override status (buildSectorsRow defaults to "Enslaved" for imports)
+    const statusIdx = headers.indexOf("Status");
+    if (statusIdx !== -1) row[statusIdx] = minionStatus;
+
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Sectors!A:Z",
+      valueInputOption: "USER_ENTERED",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [row] },
+    });
+
+    // Optionally add to quest board
+    let questAdded = false;
+    if (addToQuest === "1" && minionStatus === "Engaged") {
+      await ensureQuestsSheet(sheets);
+      const defRes = await sheets.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: "Definitions",
+      });
+      const definitions = parseTable(defRes.data.values);
+      const { proofType, suggestion } = generateProofSuggestion(sector, definitions);
+      const taskDetail = task || suggestion;
+      const questId = generateQuestId();
+
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: "Quests!A:I",
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: {
+          values: [[questId, boss, minion, sector, "Active", proofType, "", taskDetail, ""]],
+        },
+      });
+
+      await updateSectorsQuestStatus(sheets, sector, boss, minion, "Active");
+      questAdded = true;
+    }
+
+    res.redirect(`/admin/manual?success=1${questAdded ? '&quest=1' : ''}`);
+  } catch (err) {
+    console.error("Manual entry error:", err);
+    res.status(500).send(`<pre style="color:red">Error adding minion: ${err.message}</pre>`);
   }
 });
 
