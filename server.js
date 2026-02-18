@@ -643,7 +643,7 @@ function processAllData(html, data, activeQuestKeys) {
   });
 
   let rankHtml = "";
-  incompleteBosses.forEach((boss, i) => {
+  incompleteBosses.slice(0, 10).forEach((boss, i) => {
     // Color gradient: gold for nearly complete → cyan for just started
     const t = incompleteBosses.length > 1 ? i / (incompleteBosses.length - 1) : 0;
     const r = Math.round(255 - t * 255 + t * 0);
@@ -1264,15 +1264,21 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         width: 80px;
         text-decoration: none;
         color: inherit;
+        cursor: pointer;
     }
     .guardian-orb-circle {
         width: 50px;
         height: 50px;
         border-radius: 50%;
-        transition: transform 0.2s;
+        transition: transform 0.2s, box-shadow 0.2s;
     }
-    .guardian-orb-circle:hover {
-        transform: scale(1.15);
+    .guardian-orb:hover .guardian-orb-circle {
+        transform: scale(1.2);
+        box-shadow: 0 0 20px #ffea00, 0 0 40px rgba(255, 234, 0, 0.4) !important;
+        border-color: #ffea00 !important;
+    }
+    .guardian-orb:hover .guardian-label {
+        color: #ffea00;
     }
     .guardian-orb.complete .guardian-orb-circle {
         box-shadow: 0 0 15px #00ff9d, 0 0 30px rgba(0, 255, 157, 0.3);
@@ -2752,7 +2758,6 @@ app.get("/army", async (req, res) => {
 function buildAdminPage() {
   const functions = [
     { id: "import", title: "PHOTO IMPORT", desc: "Upload lesson photos for AI classification and auto-import to the tracker.", href: "/admin/import", active: true },
-    { id: "catalog", title: "OBJECTIVE CATALOG", desc: "Browse subjects, assign objectives to the student, and manage the catalog.", href: "/admin/catalog", active: false },
     { id: "quests", title: "QUEST APPROVAL", desc: "Review and approve completed quests submitted by Henry.", href: "/admin/quests", active: true },
     { id: "manual", title: "MANUAL ENTRY", desc: "Directly add or edit minions in the Sectors sheet.", href: "#", active: false },
     { id: "reports", title: "PROGRESS REPORTS", desc: "Generate weekly and monthly stat summaries.", href: "#", active: false },

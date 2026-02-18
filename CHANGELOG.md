@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.2.0] - 2025-02-18
+
+### Added
+- **Clickable Ring of Guardians** — Guardian orbs now have yellow hover glow, pointer cursor, and label highlight for better discoverability as links to boss pages
+- **Boss Conquest top-10 limit** — Boss Conquest Rankings on the HUD now display only the top 10 incomplete bosses
+
+### Removed
+- **Catalog admin card** — Removed the greyed-out "Objective Catalog" card from the admin page entirely
+
 ## [2.1.0] - 2025-02-18
 
 ### Added
