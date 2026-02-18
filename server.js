@@ -2867,10 +2867,13 @@ app.get("/quests", async (req, res) => {
     const definitions = parseTable(defRes.data.values);
     const artifactOptions = getArtifactOptions(definitions);
 
-    const statusOrder = ["Active", "Submitted", "Approved", "Rejected", "Abandoned"];
-    const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Approved: "#00ff9d", Rejected: "#ff0044", Abandoned: "#555" };
+    const statusOrder = ["Active", "Submitted", "Approved", "Rejected"];
+    const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Approved: "#00ff9d", Rejected: "#ff0044" };
 
-    const sorted = [...quests].sort((a, b) =>
+    // Filter out Abandoned quests — they stay in the sheet for audit but don't show on the board
+    const visible = quests.filter((q) => q["Status"] !== "Abandoned");
+
+    const sorted = [...visible].sort((a, b) =>
       statusOrder.indexOf(a["Status"]) - statusOrder.indexOf(b["Status"])
     );
 
@@ -2931,8 +2934,8 @@ app.get("/quests", async (req, res) => {
         </div>`;
     }
 
-    const activeCount = quests.filter((q) => q["Status"] === "Active").length;
-    res.send(buildQuestBoardPage(questRows, activeCount, quests.length));
+    const activeCount = visible.filter((q) => q["Status"] === "Active").length;
+    res.send(buildQuestBoardPage(questRows, activeCount, visible.length));
   } catch (err) {
     console.error("Quest board error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
@@ -3230,24 +3233,179 @@ app.get("/progress", async (req, res) => {
       }))
       .sort((a, b) => b.date.localeCompare(a.date)); // newest first
 
-    // Build stat level progress bars (SVG bar chart)
-    const statData = [
-      { name: "INTEL", value: intel.value, level: intel.level, color: "#00f2ff", max: intel.totalPossible },
-      { name: "STAMINA", value: stamina.value, level: stamina.level, color: "#00ff9d", max: stamina.totalPossible },
-      { name: "TEMPO", value: tempo.value, level: tempo.level, color: "#ff00ff", max: tempo.totalPossible },
-      { name: "REPUTATION", value: reputation.value, level: reputation.level, color: "#ff8800", max: reputation.totalPossible },
-      { name: "CONFIDENCE", value: confidence.value, level: confidence.level, color: "#ffea00", max: confidence.totalPossible },
-    ];
+    // Build stat growth timeline chart
+    // Collect stat contributions from enslaved minions with completion dates
+    const statNames = ["INTELLIGENCE", "STAMINA", "TEMPO", "REPUTATION"];
+    const statLabels = { INTELLIGENCE: "INTEL", STAMINA: "STAMINA", TEMPO: "TEMPO", REPUTATION: "REPUTATION" };
+    const statColors = { INTELLIGENCE: "#00f2ff", STAMINA: "#00ff9d", TEMPO: "#ff00ff", REPUTATION: "#ff8800" };
 
+    // Build sector weight lookup from definitions
+    const sectorWeightsMap = {};
+    for (const d of definitions) {
+      if (d["Sector"]) {
+        sectorWeightsMap[d["Sector"].toUpperCase()] = {
+          INTELLIGENCE: parseFloat(d["INTELLIGENCE"]) || 0,
+          STAMINA: parseFloat(d["STAMINA"]) || 0,
+          TEMPO: parseFloat(d["TEMPO"]) || 0,
+          REPUTATION: parseFloat(d["REPUTATION"]) || 0,
+        };
+      }
+    }
+
+    // Collect dated stat events from enslaved minions
+    const statEvents = [];
+    for (const m of allMinions) {
+      if (m["Status"] !== "Enslaved") continue;
+      const dateStr = m["Date Quest Completed"] || "";
+      if (!dateStr || dateStr.length < 10) continue; // need YYYY-MM-DD
+      const impact = parseFloat(m["Impact(1-3)"]) || 1;
+      const sw = sectorWeightsMap[(m["Sector"] || "").toUpperCase()];
+      if (!sw) continue;
+      for (const stat of statNames) {
+        statEvents.push({ date: dateStr.slice(0, 10), stat, points: impact * sw[stat] });
+      }
+    }
+
+    // Determine time range and bucket size
     let statBarsHtml = "";
-    for (const s of statData) {
-      const pct = s.max > 0 ? Math.min(100, (s.value / s.max) * 100) : 0;
-      statBarsHtml += `
-        <div class="prog-stat">
-          <div class="prog-stat-label" style="color:${s.color};">${s.name}: ${s.level}</div>
-          <div class="prog-stat-bar"><div class="prog-stat-fill" style="width:${pct.toFixed(1)}%;background:${s.color};"></div></div>
-          <div class="prog-stat-pct" style="color:${s.color};">${pct.toFixed(0)}%</div>
-        </div>`;
+    if (statEvents.length === 0) {
+      // Fallback: show current values as simple bars
+      const statData = [
+        { name: "INTEL", value: intel.value, level: intel.level, color: "#00f2ff", max: intel.totalPossible },
+        { name: "STAMINA", value: stamina.value, level: stamina.level, color: "#00ff9d", max: stamina.totalPossible },
+        { name: "TEMPO", value: tempo.value, level: tempo.level, color: "#ff00ff", max: tempo.totalPossible },
+        { name: "REPUTATION", value: reputation.value, level: reputation.level, color: "#ff8800", max: reputation.totalPossible },
+        { name: "CONFIDENCE", value: confidence.value, level: confidence.level, color: "#ffea00", max: confidence.totalPossible },
+      ];
+      statBarsHtml = '<div style="text-align:center;color:#555;font-size:0.7em;margin-bottom:10px;">NO DATE DATA YET — SHOWING CURRENT LEVELS</div>';
+      for (const s of statData) {
+        const pct = s.max > 0 ? Math.min(100, (s.value / s.max) * 100) : 0;
+        statBarsHtml += `
+          <div class="prog-stat">
+            <div class="prog-stat-label" style="color:${s.color};">${s.name}: ${s.level}</div>
+            <div class="prog-stat-bar"><div class="prog-stat-fill" style="width:${pct.toFixed(1)}%;background:${s.color};"></div></div>
+            <div class="prog-stat-pct" style="color:${s.color};">${pct.toFixed(0)}%</div>
+          </div>`;
+      }
+    } else {
+      // Find date range
+      const allDates = statEvents.map((e) => e.date).sort();
+      const minDate = new Date(allDates[0]);
+      const maxDate = new Date(allDates[allDates.length - 1]);
+      const daySpan = Math.max(1, Math.round((maxDate - minDate) / (1000 * 60 * 60 * 24)));
+
+      // Choose bucket: daily ≤7 days, weekly ≤60 days, monthly otherwise
+      let bucketMode, bucketLabel;
+      if (daySpan <= 7) { bucketMode = "day"; bucketLabel = "DAILY"; }
+      else if (daySpan <= 60) { bucketMode = "week"; bucketLabel = "WEEKLY"; }
+      else { bucketMode = "month"; bucketLabel = "MONTHLY"; }
+
+      const toBucket = (dateStr) => {
+        const d = new Date(dateStr);
+        if (bucketMode === "day") return dateStr.slice(0, 10);
+        if (bucketMode === "week") {
+          const day = d.getDay();
+          const weekStart = new Date(d);
+          weekStart.setDate(d.getDate() - day);
+          return weekStart.toISOString().slice(0, 10);
+        }
+        return dateStr.slice(0, 7); // YYYY-MM
+      };
+
+      const formatBucket = (b) => {
+        if (bucketMode === "day") return b.slice(5); // MM-DD
+        if (bucketMode === "week") return "W" + b.slice(5); // WMM-DD
+        return b; // YYYY-MM
+      };
+
+      // Accumulate points per bucket per stat
+      const bucketTotals = {}; // { bucket: { INTELLIGENCE: pts, ... } }
+      for (const e of statEvents) {
+        const b = toBucket(e.date);
+        if (!bucketTotals[b]) bucketTotals[b] = { INTELLIGENCE: 0, STAMINA: 0, TEMPO: 0, REPUTATION: 0 };
+        bucketTotals[b][e.stat] += e.points;
+      }
+
+      const buckets = Object.keys(bucketTotals).sort();
+
+      // Build cumulative totals
+      const cumulative = [];
+      const running = { INTELLIGENCE: 0, STAMINA: 0, TEMPO: 0, REPUTATION: 0 };
+      for (const b of buckets) {
+        for (const stat of statNames) running[stat] += bucketTotals[b][stat];
+        cumulative.push({ bucket: b, ...running });
+      }
+
+      // Find max value for scaling
+      let maxVal = 0;
+      for (const c of cumulative) {
+        for (const stat of statNames) {
+          if (c[stat] > maxVal) maxVal = c[stat];
+        }
+      }
+      maxVal = maxVal || 1;
+
+      // Build SVG bar chart
+      const chartW = 700;
+      const chartH = 220;
+      const padL = 50;
+      const padB = 35;
+      const padT = 10;
+      const padR = 10;
+      const plotW = chartW - padL - padR;
+      const plotH = chartH - padB - padT;
+      const barGroupW = cumulative.length > 0 ? plotW / cumulative.length : plotW;
+      const barW = Math.max(3, Math.min(16, (barGroupW - 4) / statNames.length));
+
+      let svg = `<svg width="100%" viewBox="0 0 ${chartW} ${chartH}" xmlns="http://www.w3.org/2000/svg" style="max-width:${chartW}px;">`;
+      // Grid lines
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + plotH - (i / 4) * plotH;
+        const val = ((i / 4) * maxVal).toFixed(0);
+        svg += `<line x1="${padL}" y1="${y}" x2="${chartW - padR}" y2="${y}" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>`;
+        svg += `<text x="${padL - 5}" y="${y + 3}" fill="#555" font-size="9" text-anchor="end" font-family="monospace">${val}</text>`;
+      }
+
+      // Bars
+      for (let ci = 0; ci < cumulative.length; ci++) {
+        const c = cumulative[ci];
+        const groupX = padL + ci * barGroupW + 2;
+        for (let si = 0; si < statNames.length; si++) {
+          const stat = statNames[si];
+          const h = (c[stat] / maxVal) * plotH;
+          const x = groupX + si * (barW + 1);
+          const y = padT + plotH - h;
+          svg += `<rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="${statColors[stat]}" opacity="0.85" rx="1">`;
+          svg += `<title>${statLabels[stat]}: ${c[stat].toFixed(1)}</title></rect>`;
+        }
+        // Bucket label
+        const labelX = groupX + (statNames.length * (barW + 1)) / 2;
+        svg += `<text x="${labelX}" y="${chartH - 5}" fill="#555" font-size="8" text-anchor="middle" font-family="monospace">${formatBucket(c.bucket)}</text>`;
+      }
+
+      // Legend
+      const legendY = padT + 2;
+      for (let si = 0; si < statNames.length; si++) {
+        const lx = padL + si * 100;
+        svg += `<rect x="${lx}" y="${legendY}" width="10" height="10" fill="${statColors[statNames[si]]}" rx="1"/>`;
+        svg += `<text x="${lx + 14}" y="${legendY + 9}" fill="${statColors[statNames[si]]}" font-size="9" font-family="monospace">${statLabels[statNames[si]]}</text>`;
+      }
+
+      svg += `</svg>`;
+
+      // Current levels summary line
+      const levelSummary = [
+        `<span style="color:#00f2ff">INT: ${intel.level}</span>`,
+        `<span style="color:#00ff9d">STA: ${stamina.level}</span>`,
+        `<span style="color:#ff00ff">TMP: ${tempo.level}</span>`,
+        `<span style="color:#ff8800">REP: ${reputation.level}</span>`,
+        `<span style="color:#ffea00">CONF: ${confidence.level}</span>`,
+      ].join(' <span style="color:#333;">|</span> ');
+
+      statBarsHtml = `
+        <div style="text-align:center;color:#888;font-size:0.65em;letter-spacing:2px;margin-bottom:8px;">CUMULATIVE GROWTH &mdash; ${bucketLabel} VIEW (${cumulative.length} ${bucketMode === "day" ? "DAYS" : bucketMode === "week" ? "WEEKS" : "MONTHS"})</div>
+        <div style="overflow-x:auto;">${svg}</div>
+        <div style="text-align:center;font-size:0.75em;letter-spacing:1px;margin-top:10px;">CURRENT: ${levelSummary}</div>`;
     }
 
     // Sector donut chart data (pure CSS)
@@ -4047,9 +4205,11 @@ app.get("/admin/manual", async (req, res) => {
     const bosses = [...new Set(allMinions.map((r) => r["Boss"]).filter(Boolean))].sort();
     const subjects = [...new Set(allMinions.map((r) => r["Subject"]).filter(Boolean))].sort();
 
-    const sectorOptions = sectors.map((s) => `<option value="${escHtml(s)}">`).join("");
-    const bossOptions = bosses.map((b) => `<option value="${escHtml(b)}">`).join("");
-    const subjectOptions = subjects.map((s) => `<option value="${escHtml(s)}">`).join("");
+    const minions = [...new Set(allMinions.map((r) => r["Minion"]).filter(Boolean))].sort();
+    const sectorOpts = sectors.map((s) => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join("");
+    const bossOpts = bosses.map((b) => `<option value="${escHtml(b)}">${escHtml(b)}</option>`).join("");
+    const subjectOpts = subjects.map((s) => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join("");
+    const minionOpts = minions.map((m) => `<option value="${escHtml(m)}">${escHtml(m)}</option>`).join("");
 
     const successMsg = req.query.success === "1"
       ? `<div class="success-msg">&#x2714; MINION ADDED SUCCESSFULLY!</div>` : "";
@@ -4193,6 +4353,34 @@ app.get("/admin/manual", async (req, res) => {
         background: rgba(0, 255, 157, 0.05);
     }
     .required { color: #ff4444; }
+    .combo-input {
+        width: 100%;
+        padding: 10px;
+        background: #1a1d26;
+        border: 1px solid #ffea00;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        font-size: 0.85em;
+        box-sizing: border-box;
+        margin-top: 5px;
+    }
+    .combo-input:focus {
+        outline: none;
+        border-color: #ffea00;
+        box-shadow: 0 0 5px rgba(255, 234, 0, 0.3);
+    }
+    .combo-back-btn {
+        background: none;
+        border: 1px solid #555;
+        color: #888;
+        padding: 4px 10px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.65em;
+        cursor: pointer;
+        margin-top: 5px;
+        transition: all 0.2s;
+    }
+    .combo-back-btn:hover { border-color: #00f2ff; color: #00f2ff; }
     @media (max-width: 600px) {
         body { padding: 10px; }
         .form-row { grid-template-columns: 1fr; }
@@ -4205,32 +4393,45 @@ app.get("/admin/manual", async (req, res) => {
         <h1>&#x270F; Manual Entry</h1>
         <div class="manual-subtitle">ADD NEW OBJECTIVES WITHOUT OPENING GOOGLE SHEETS</div>
         ${successMsg}${addedToQuest}
-        <form method="POST" action="/admin/manual">
+        <form method="POST" action="/admin/manual" id="manualForm">
             <div class="form-row">
                 <div class="form-group">
                     <label>SECTOR <span class="required">*</span></label>
-                    <input type="text" name="sector" required list="sector-list" placeholder="e.g. Mathematics">
-                    <datalist id="sector-list">${sectorOptions}</datalist>
-                    <div class="hint">Choose an existing sector or type a new one</div>
+                    <select name="sector" required class="combo-select" data-target="sector-new">
+                        <option value="" disabled selected>Select sector...</option>
+                        ${sectorOpts}
+                        <option value="__new__">+ Add new sector...</option>
+                    </select>
+                    <input type="text" class="combo-input" id="sector-new" placeholder="Type new sector name..." style="display:none;">
                 </div>
                 <div class="form-group">
                     <label>SUBJECT</label>
-                    <input type="text" name="subject" list="subject-list" placeholder="e.g. Algebra">
-                    <datalist id="subject-list">${subjectOptions}</datalist>
-                    <div class="hint">Optional sub-category within the sector</div>
+                    <select name="subject" class="combo-select" data-target="subject-new">
+                        <option value="">— None —</option>
+                        ${subjectOpts}
+                        <option value="__new__">+ Add new subject...</option>
+                    </select>
+                    <input type="text" class="combo-input" id="subject-new" placeholder="Type new subject..." style="display:none;">
                 </div>
             </div>
             <div class="form-row">
                 <div class="form-group">
                     <label>BOSS <span class="required">*</span></label>
-                    <input type="text" name="boss" required list="boss-list" placeholder="e.g. Fractions">
-                    <datalist id="boss-list">${bossOptions}</datalist>
-                    <div class="hint">The topic or skill group this belongs to</div>
+                    <select name="boss" required class="combo-select" data-target="boss-new">
+                        <option value="" disabled selected>Select boss...</option>
+                        ${bossOpts}
+                        <option value="__new__">+ Add new boss...</option>
+                    </select>
+                    <input type="text" class="combo-input" id="boss-new" placeholder="Type new boss name..." style="display:none;">
                 </div>
                 <div class="form-group">
                     <label>MINION NAME <span class="required">*</span></label>
-                    <input type="text" name="minion" required placeholder="e.g. Add unlike fractions">
-                    <div class="hint">The specific learning objective</div>
+                    <select name="minion" required class="combo-select" data-target="minion-new">
+                        <option value="" disabled selected>Select minion...</option>
+                        ${minionOpts}
+                        <option value="__new__">+ Add new minion...</option>
+                    </select>
+                    <input type="text" class="combo-input" id="minion-new" placeholder="Type new minion name..." style="display:none;">
                 </div>
             </div>
             <div class="form-group">
@@ -4240,14 +4441,14 @@ app.get("/admin/manual", async (req, res) => {
             </div>
             <div class="form-row">
                 <div class="form-group">
-                    <label>IMPACT (1-3) <span class="required">*</span></label>
+                    <label>IMPACT TO SCORE <span class="required">*</span></label>
                     <select name="impact" required>
                         <option value="" disabled selected>Select impact...</option>
-                        <option value="1">1 — Basic</option>
-                        <option value="2">2 — Moderate</option>
-                        <option value="3">3 — Advanced</option>
+                        <option value="1">1 — Low impact to score</option>
+                        <option value="2">2 — Medium impact to score</option>
+                        <option value="3">3 — Highest impact to score</option>
                     </select>
-                    <div class="hint">How much does this contribute to stat growth?</div>
+                    <div class="hint">How much stat points does this objective earn?</div>
                 </div>
                 <div class="form-group">
                     <label>INITIAL STATUS</label>
@@ -4266,6 +4467,54 @@ app.get("/admin/manual", async (req, res) => {
             <button type="submit" class="submit-btn">ADD MINION</button>
         </form>
     </div>
+    <script>
+    // Combo select: show text input when "Add new..." is selected
+    document.querySelectorAll('.combo-select').forEach(function(sel) {
+        var targetId = sel.getAttribute('data-target');
+        var input = document.getElementById(targetId);
+        if (!input) return;
+        sel.addEventListener('change', function() {
+            if (sel.value === '__new__') {
+                sel.style.display = 'none';
+                input.style.display = 'block';
+                input.required = sel.required;
+                input.focus();
+            }
+        });
+        // Allow clicking back to the select (button next to input)
+        var backBtn = document.createElement('button');
+        backBtn.type = 'button';
+        backBtn.textContent = '\\u2190 BACK TO LIST';
+        backBtn.className = 'combo-back-btn';
+        backBtn.style.display = 'none';
+        input.parentNode.insertBefore(backBtn, input.nextSibling);
+        input.addEventListener('focus', function() { backBtn.style.display = 'inline-block'; });
+        backBtn.addEventListener('click', function() {
+            input.style.display = 'none';
+            input.value = '';
+            input.required = false;
+            backBtn.style.display = 'none';
+            sel.style.display = 'block';
+            sel.value = '';
+        });
+    });
+    // On form submit, copy text input values into select name
+    document.getElementById('manualForm').addEventListener('submit', function(e) {
+        document.querySelectorAll('.combo-select').forEach(function(sel) {
+            var targetId = sel.getAttribute('data-target');
+            var input = document.getElementById(targetId);
+            if (input && input.style.display !== 'none' && input.value.trim()) {
+                // Create hidden input with the same name and the typed value
+                var hidden = document.createElement('input');
+                hidden.type = 'hidden';
+                hidden.name = sel.name;
+                hidden.value = input.value.trim();
+                sel.form.appendChild(hidden);
+                sel.removeAttribute('name'); // prevent duplicate
+            }
+        });
+    });
+    </script>
 </body>
 </html>`);
   } catch (err) {

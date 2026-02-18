@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.6.0] - 2025-02-18
+
+### Added
+- **Timeline stat growth chart** on Progress page — SVG bar chart showing cumulative stat growth over time. Automatically selects daily/weekly/monthly view based on date range. Falls back to simple progress bars when no date data exists
+
+### Changed
+- **Quest board** — Abandoned quests no longer appear on the board (kept in Quests sheet for audit trail only)
+- **Manual Entry form** — All fields (Sector, Subject, Boss, Minion) are now dropdown selects populated from existing data, with a "+ Add new..." option that reveals a text input. Impact labels updated to "Low/Medium/Highest impact to score"
+
 ## [2.5.0] - 2025-02-18
 
 ### Added
