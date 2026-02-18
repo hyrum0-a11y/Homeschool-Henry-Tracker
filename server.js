@@ -3233,6 +3233,111 @@ app.get("/progress", async (req, res) => {
       }))
       .sort((a, b) => b.date.localeCompare(a.date)); // newest first
 
+    // -- SUMMARY SPARKLINES (past 30 days) --
+    const today = new Date();
+    const days30 = [];
+    for (let i = 29; i >= 0; i--) {
+      const d = new Date(today);
+      d.setDate(d.getDate() - i);
+      days30.push(d.toISOString().slice(0, 10));
+    }
+
+    // Collect completion dates for enslaved minions
+    const minionCompleteDates = allMinions
+      .filter((m) => m["Status"] === "Enslaved" && m["Date Quest Completed"])
+      .map((m) => m["Date Quest Completed"].slice(0, 10))
+      .sort();
+
+    // Quest completion dates (approved)
+    const questCompleteDates = approvedQuests
+      .filter((q) => q["Date Completed"])
+      .map((q) => q["Date Completed"].slice(0, 10))
+      .sort();
+
+    // Quest added dates (for in-progress tracking)
+    const questAddedDates = quests
+      .filter((q) => q["Status"] === "Active" || q["Status"] === "Submitted")
+      .map((q) => {
+        // Try to find the corresponding minion's Date Quest Added
+        const m = allMinions.find((r) => r["Boss"] === q["Boss"] && r["Minion"] === q["Minion"] && r["Sector"] === q["Sector"]);
+        return (m && m["Date Quest Added"]) ? m["Date Quest Added"].slice(0, 10) : "";
+      })
+      .filter(Boolean)
+      .sort();
+
+    // Helper: count items <= date (cumulative)
+    const countUpTo = (sortedDates, date) => {
+      let count = 0;
+      for (const d of sortedDates) { if (d <= date) count++; else break; }
+      return count;
+    };
+
+    // Build daily series for each metric
+    // 1. Minions Enslaved (cumulative by completion date)
+    const enslavedByDay = days30.map((d) => countUpTo(minionCompleteDates, d));
+    // For minions without dates, they exist but aren't in minionCompleteDates.
+    // Current total = totalEnslaved, so scale: if no dates, show flat at current value
+    const enslavedWithDates = minionCompleteDates.length;
+    const enslavedNoDates = totalEnslaved - enslavedWithDates;
+    const enslavedSeries = enslavedByDay.map((v) => v + enslavedNoDates);
+
+    // 2. Overall Conquest % (derived)
+    const conquestSeries = enslavedSeries.map((v) => totalMinions > 0 ? Math.round((v / totalMinions) * 100) : 0);
+
+    // 3. Bosses Conquered — need per-boss completion date (latest minion date for fully conquered bosses)
+    const bossCompleteDates = [];
+    for (const b of allBosses) {
+      if (b.enslaved < b.total) continue;
+      // Find latest Date Quest Completed among this boss's minions
+      const bossMinions = allMinions.filter((m) => m["Sector"] === b.sector && m["Boss"] === b.boss && m["Status"] === "Enslaved");
+      const dates = bossMinions.map((m) => (m["Date Quest Completed"] || "").slice(0, 10)).filter(Boolean);
+      if (dates.length > 0) bossCompleteDates.push(dates.sort().pop());
+    }
+    bossCompleteDates.sort();
+    const bossesWithDates = bossCompleteDates.length;
+    const bossesNoDates = completedBosses.length - bossesWithDates;
+    const bossSeries = days30.map((d) => countUpTo(bossCompleteDates, d) + bossesNoDates);
+
+    // 4. Guardians Defeated — same logic for survival bosses
+    const guardianCompleteDates = [];
+    for (const b of survivalBosses) {
+      if (b.enslaved < b.total) continue;
+      const bossMinions = allMinions.filter((m) => m["Sector"] === b.sector && m["Boss"] === b.boss && m["Status"] === "Enslaved");
+      const dates = bossMinions.map((m) => (m["Date Quest Completed"] || "").slice(0, 10)).filter(Boolean);
+      if (dates.length > 0) guardianCompleteDates.push(dates.sort().pop());
+    }
+    guardianCompleteDates.sort();
+    const guardiansWithDates = guardianCompleteDates.length;
+    const guardiansNoDates = completedSurvival - guardiansWithDates;
+    const guardianSeries = days30.map((d) => countUpTo(guardianCompleteDates, d) + guardiansNoDates);
+
+    // 5. Quests Completed (cumulative approved)
+    const questsWithDates = questCompleteDates.length;
+    const questsNoDates = approvedQuests.length - questsWithDates;
+    const questCompleteSeries = days30.map((d) => countUpTo(questCompleteDates, d) + questsNoDates);
+
+    // 6. Quests In Progress — constant at current value (no historical data for status changes)
+    const questInProgressCurrent = activeQuests.length + submittedQuests.length;
+    const questInProgressSeries = days30.map(() => questInProgressCurrent);
+
+    // SVG sparkline bar builder
+    function buildSparkBars(series, color, maxOverride) {
+      const w = 150;
+      const h = 30;
+      const maxV = maxOverride != null ? maxOverride : Math.max(...series, 1);
+      const barW = w / series.length;
+      let svg = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;margin:6px auto 0;">`;
+      for (let i = 0; i < series.length; i++) {
+        const barH = maxV > 0 ? (series[i] / maxV) * h : 0;
+        const x = i * barW;
+        const y = h - barH;
+        const opacity = i === series.length - 1 ? 1 : 0.5;
+        svg += `<rect x="${x}" y="${y}" width="${Math.max(barW - 0.5, 1)}" height="${barH}" fill="${color}" opacity="${opacity}" rx="0.5"><title>${days30[i]}: ${series[i]}</title></rect>`;
+      }
+      svg += `</svg>`;
+      return svg;
+    }
+
     // Build stat growth timeline chart
     // Collect stat contributions from enslaved minions with completion dates
     const statNames = ["INTELLIGENCE", "STAMINA", "TEMPO", "REPUTATION"];
@@ -3697,26 +3802,32 @@ app.get("/progress", async (req, res) => {
             <div class="summary-card">
                 <div class="summary-value" style="color:#00ff9d;">${totalEnslaved}</div>
                 <div class="summary-label">MINIONS ENSLAVED</div>
+                ${buildSparkBars(enslavedSeries, "#00ff9d")}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#ffea00;">${overallPct}%</div>
                 <div class="summary-label">OVERALL CONQUEST</div>
+                ${buildSparkBars(conquestSeries, "#ffea00", 100)}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#ff6600;">${completedBosses.length}/${totalBosses}</div>
                 <div class="summary-label">BOSSES CONQUERED</div>
+                ${buildSparkBars(bossSeries, "#ff6600", totalBosses)}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#ff4444;">${completedSurvival}/${survivalBosses.length}</div>
                 <div class="summary-label">GUARDIANS DEFEATED</div>
+                ${buildSparkBars(guardianSeries, "#ff4444", survivalBosses.length)}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#ff00ff;">${approvedQuests.length}</div>
                 <div class="summary-label">QUESTS COMPLETED</div>
+                ${buildSparkBars(questCompleteSeries, "#ff00ff")}
             </div>
             <div class="summary-card">
-                <div class="summary-value" style="color:#00f2ff;">${activeQuests.length + submittedQuests.length}</div>
+                <div class="summary-value" style="color:#00f2ff;">${questInProgressCurrent}</div>
                 <div class="summary-label">QUESTS IN PROGRESS</div>
+                ${buildSparkBars(questInProgressSeries, "#00f2ff")}
             </div>
         </div>
 
