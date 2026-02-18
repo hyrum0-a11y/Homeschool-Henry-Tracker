@@ -33,13 +33,10 @@ A gamified homeschool progress tracker that turns learning objectives into a vid
 - HUD shows mode banner, proportionally glowing hearts, and Ring of Guardians orbs
 - Hearts and orbs sorted by conquest rate (highest first, then alphabetical)
 
-### Objective Catalog
-- **Subject picker** grouped by Sector, with subject cards nested within each sector
-- **Objective view** grouped hierarchically: Sector → Boss → Minions
-- **Manage Student Items** grouped by Sector → Subject → Boss with visual indentation and colored left-border accents
-- Student Task column is authoritative (protected from catalog overrides)
-- Removal warning about impact on total possible points
-- Multi-select quest adding with batch submission
+### Objective Catalog (removed from web UI)
+- Catalog routes have been removed from the web interface
+- The Master Catalog Google Sheet is retained for reference and future use
+- Student items are managed directly in the Sectors Google Sheet
 
 ### Other Features
 - **AI Photo Import** — Upload lesson photos and Claude AI classifies them into the tracker
@@ -129,11 +126,7 @@ Ensure the Sectors sheet has these columns in the header row:
 | `/admin` | Parent admin console |
 | `/admin/quests` | Quest approval (approve, reject, reopen, sync) |
 | `/admin/import` | AI photo import |
-| `/admin/catalog` | Subject picker grouped by sector |
-| `/admin/catalog/view` | Browse and assign/remove objectives (grouped by Sector → Boss) |
-| `/admin/catalog/student` | Manage student items (Sector → Subject → Boss hierarchy) |
-| `/admin/catalog/locked` | Manage locked items and prerequisites |
-| `/admin/catalog/generate` | AI objective generation |
+| ~~`/admin/catalog`~~ | *(Removed)* Catalog routes removed from web UI |
 
 ## Sector-to-Subject Mapping
 
