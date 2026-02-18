@@ -3740,7 +3740,7 @@ app.post("/admin/import/approve", async (req, res) => {
 async function fetchCatalogData(sheets) {
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: CATALOG_SPREADSHEET_ID,
-    range: "Catalog",
+    range: "Catalog!A:Z",
   });
   const values = res.data.values || [];
   return { headers: values[0] || [], rows: parseTable(values) };
@@ -3787,7 +3787,7 @@ async function expandCatalogTable(sheets) {
   // Get current data size
   const dataRes = await sheets.spreadsheets.values.get({
     spreadsheetId: CATALOG_SPREADSHEET_ID,
-    range: "Catalog",
+    range: "Catalog!A:Z",
   });
   const totalRows = (dataRes.data.values || []).length;
   const totalCols = (dataRes.data.values || [[]])[0].length;
@@ -3954,31 +3954,48 @@ app.get("/admin/catalog", async (req, res) => {
       }
     }
 
-    // Group catalog by Subject
-    const subjectMap = {};
+    // Group catalog by Sector → Subject
+    const sectorMap = {}; // { sector: { subject: { total, inSheet } } }
     for (const row of catalog.rows) {
+      const sector = row["Sector"] || "General";
       const subject = row["Subject"] || row["Sector"] || "General";
-      const sector = row["Sector"] || "";
-      if (!subjectMap[subject]) subjectMap[subject] = { sector, total: 0, inSheet: 0 };
-      subjectMap[subject].total++;
+      if (!sectorMap[sector]) sectorMap[sector] = {};
+      if (!sectorMap[sector][subject]) sectorMap[sector][subject] = { total: 0, inSheet: 0 };
+      sectorMap[sector][subject].total++;
       const key = `${row["Sector"]}|${row["Boss"]}|${row["Minion"]}`;
-      if (studentKeys.has(key)) subjectMap[subject].inSheet++;
+      if (studentKeys.has(key)) sectorMap[sector][subject].inSheet++;
     }
 
-    const sortedSubjects = Object.keys(subjectMap).sort();
+    const sortedSectors = Object.keys(sectorMap).sort();
 
-    const cards = sortedSubjects.map((subject) => {
-      const info = subjectMap[subject];
-      const pct = info.total > 0 ? Math.round((info.inSheet / info.total) * 100) : 0;
-      const encodedSubject = encodeURIComponent(subject);
-      const completeClass = pct >= 100 ? " subject-complete" : "";
-      return `<label class="subject-card${completeClass}">
-        <input type="checkbox" name="subjects" value="${escHtml(subject)}" class="subject-chk">
-        <div class="subject-name">${escHtml(subject)}</div>
-        <div class="subject-stats">${info.inSheet} / ${info.total} assigned</div>
-        <div class="subject-bar"><div class="subject-fill" style="width:${pct}%"></div></div>
-      </label>`;
-    }).join("\n");
+    let cards = "";
+    for (const sector of sortedSectors) {
+      const subjects = sectorMap[sector];
+      const sortedSubjects = Object.keys(subjects).sort();
+      // Sector totals
+      let sectorTotal = 0, sectorInSheet = 0;
+      for (const s of sortedSubjects) { sectorTotal += subjects[s].total; sectorInSheet += subjects[s].inSheet; }
+      const sectorPct = sectorTotal > 0 ? Math.round((sectorInSheet / sectorTotal) * 100) : 0;
+      const sectorComplete = sectorPct >= 100 ? " sector-complete" : "";
+      cards += `<div class="sector-group${sectorComplete}">
+        <div class="sector-header">
+          <span class="sector-name">${escHtml(sector)}</span>
+          <span class="sector-stats">${sectorInSheet} / ${sectorTotal} &bull; ${sectorPct}%</span>
+        </div>
+        <div class="subject-grid">`;
+      for (const subject of sortedSubjects) {
+        const info = subjects[subject];
+        const pct = info.total > 0 ? Math.round((info.inSheet / info.total) * 100) : 0;
+        const completeClass = pct >= 100 ? " subject-complete" : "";
+        cards += `<label class="subject-card${completeClass}">
+          <input type="checkbox" name="subjects" value="${escHtml(subject)}" class="subject-chk">
+          <div class="subject-name">${escHtml(subject)}</div>
+          <div class="subject-stats">${info.inSheet} / ${info.total} assigned</div>
+          <div class="subject-bar"><div class="subject-fill" style="width:${pct}%"></div></div>
+        </label>`;
+      }
+      cards += `</div></div>`;
+    }
 
     res.send(`<!DOCTYPE html>
 <html>
@@ -3988,11 +4005,41 @@ app.get("/admin/catalog", async (req, res) => {
     <title>Objective Catalog - Sovereign HUD</title>
     <style>
     ${CATALOG_CSS}
+    .sector-group {
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 15px 18px 18px;
+        margin-bottom: 20px;
+        background: rgba(255, 234, 0, 0.02);
+    }
+    .sector-group.sector-complete {
+        border-color: rgba(0, 255, 157, 0.3);
+        background: rgba(0, 255, 157, 0.02);
+    }
+    .sector-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 12px;
+        padding-bottom: 8px;
+        border-bottom: 1px dashed #333;
+    }
+    .sector-name {
+        font-size: 1.05em;
+        font-weight: bold;
+        color: #00f2ff;
+        letter-spacing: 3px;
+    }
+    .sector-complete .sector-name { color: #00ff9d; }
+    .sector-stats {
+        font-size: 0.7em;
+        color: #666;
+        letter-spacing: 1px;
+    }
     .subject-grid {
         display: grid;
         grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
         gap: 15px;
-        margin-bottom: 30px;
     }
     .subject-card {
         border: 2px solid #ff00ff;
@@ -4072,9 +4119,7 @@ app.get("/admin/catalog", async (req, res) => {
             <a href="/admin/catalog/locked" class="btn btn-cyan">MANAGE LOCKED ITEMS</a>
             <button class="btn" id="viewSelectedBtn" disabled>UPDATE SELECTED SUBJECTS</button>
         </div>
-        <div class="subject-grid">
-            ${cards}
-        </div>
+        ${cards}
     </div>
     <script>
     (function() {
@@ -4119,7 +4164,7 @@ app.get("/admin/catalog/student", async (req, res) => {
     const sheets = await getSheets();
     const student = await fetchStudentSectors(sheets);
 
-    // Also fetch catalog to get Subject names
+    // Also fetch catalog to get Subject names per boss
     const catalog = await fetchCatalogData(sheets);
     const subjectLookup = {};
     for (const row of catalog.rows) {
@@ -4127,76 +4172,91 @@ app.get("/admin/catalog/student", async (req, res) => {
       if (row["Subject"]) subjectLookup[key] = row["Subject"];
     }
 
-    // Group by sector, then by boss
-    const bySector = {};
+    // Group by Sector → Subject → Boss
+    const bySector = {}; // { sector: { subject: { boss: [rows] } } }
     for (const row of student.rows) {
       const sector = row["Sector"] || "Unknown";
       const boss = row["Boss"] || "Unknown";
+      const subject = subjectLookup[`${sector}|${boss}`] || row["Subject"] || sector;
       if (!bySector[sector]) bySector[sector] = {};
-      if (!bySector[sector][boss]) bySector[sector][boss] = [];
-      bySector[sector][boss].push(row);
+      if (!bySector[sector][subject]) bySector[sector][subject] = {};
+      if (!bySector[sector][subject][boss]) bySector[sector][subject][boss] = [];
+      bySector[sector][subject][boss].push(row);
     }
 
     const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff8800", Locked: "#666" };
 
     let sectionsHtml = "";
     for (const sector of Object.keys(bySector).sort()) {
-      const bosses = bySector[sector];
-      const firstBoss = Object.keys(bosses)[0];
-      const subject = subjectLookup[`${sector}|${firstBoss}`] || sector;
+      const subjects = bySector[sector];
 
       // Sector-level counts
       const sectorCounts = { Enslaved: 0, Engaged: 0, Locked: 0 };
-      for (const bossRows of Object.values(bosses)) {
-        for (const r of bossRows) sectorCounts[r["Status"]] = (sectorCounts[r["Status"]] || 0) + 1;
+      for (const subj of Object.values(subjects)) {
+        for (const bossRows of Object.values(subj)) {
+          for (const r of bossRows) sectorCounts[r["Status"]] = (sectorCounts[r["Status"]] || 0) + 1;
+        }
       }
 
-      let bossesHtml = "";
-      for (const bossName of Object.keys(bosses).sort()) {
-        const rows = bosses[bossName];
-        // Find survival column name dynamically
-        const survColName = Object.keys(rows[0] || {}).find((k) => k.toLowerCase().includes("survival")) || "Survival Mode Required";
-        const isSurvival = rows.some((r) => (r[survColName] || "").toUpperCase() === "X");
+      let subjectsHtml = "";
+      for (const subject of Object.keys(subjects).sort()) {
+        const bosses = subjects[subject];
 
-        const minionRows = rows.map((r) => {
-          const color = statusColor[r["Status"]] || "#666";
-          return `<tr>
-            <td style="color:${color}">${escHtml(r["Status"])}</td>
-            <td title="${escHtml(r["Task"] || "")}">${escHtml(r["Minion"])}</td>
-            <td style="text-align:center">${escHtml(r["Impact(1-3)"])}</td>
-          </tr>`;
-        }).join("");
+        let bossesHtml = "";
+        for (const bossName of Object.keys(bosses).sort()) {
+          const rows = bosses[bossName];
+          // Find survival column name dynamically
+          const survColName = Object.keys(rows[0] || {}).find((k) => k.toLowerCase().includes("survival")) || "Survival Mode Required";
+          const isSurvival = rows.some((r) => (r[survColName] || "").toUpperCase() === "X");
 
-        bossesHtml += `
-          <div class="boss-group">
-            <div class="boss-header">
-              <span class="boss-name">${escHtml(bossName)}</span>
-              <label class="survival-toggle" title="Survival Mode = essential for real-world independence. Creative Mode = optional enrichment.">
-                <input type="checkbox" class="survival-chk"
-                  data-sector="${escHtml(sector)}"
-                  data-boss="${escHtml(bossName)}"
-                  ${isSurvival ? "checked" : ""}>
-                <span class="survival-label">${isSurvival ? "SURVIVAL MODE" : "CREATIVE MODE"}</span>
-              </label>
-            </div>
-            <table class="obj-table">
-              <thead><tr><th>Status</th><th>Minion</th><th>Impact</th></tr></thead>
-              <tbody>${minionRows}</tbody>
-            </table>
-          </div>`;
+          const minionRows = rows.map((r) => {
+            const color = statusColor[r["Status"]] || "#666";
+            return `<tr>
+              <td style="color:${color}">${escHtml(r["Status"])}</td>
+              <td title="${escHtml(r["Task"] || "")}">${escHtml(r["Minion"])}</td>
+              <td style="text-align:center">${escHtml(r["Impact(1-3)"])}</td>
+            </tr>`;
+          }).join("");
+
+          bossesHtml += `
+            <div class="boss-group">
+              <div class="boss-header">
+                <span class="boss-name">${escHtml(bossName)}</span>
+                <label class="survival-toggle" title="Survival Mode = essential for real-world independence. Creative Mode = optional enrichment.">
+                  <input type="checkbox" class="survival-chk"
+                    data-sector="${escHtml(sector)}"
+                    data-boss="${escHtml(bossName)}"
+                    ${isSurvival ? "checked" : ""}>
+                  <span class="survival-label">${isSurvival ? "SURVIVAL MODE" : "CREATIVE MODE"}</span>
+                </label>
+              </div>
+              <table class="obj-table">
+                <thead><tr><th>Status</th><th>Minion</th><th>Impact</th></tr></thead>
+                <tbody>${minionRows}</tbody>
+              </table>
+            </div>`;
+        }
+
+        subjectsHtml += `
+            <div class="subject-group">
+              <div class="subject-header">
+                <span class="subject-title">${escHtml(subject)}</span>
+              </div>
+              ${bossesHtml}
+            </div>`;
       }
 
       sectionsHtml += `
         <div class="student-sector">
           <div class="sector-header">
-            <span class="sector-title">${escHtml(subject)} <span style="color:#666;font-size:0.7em">(${escHtml(sector)})</span></span>
+            <span class="sector-title">${escHtml(sector)}</span>
             <span class="sector-counts">
               <span style="color:#00ff9d">${sectorCounts.Enslaved} completed</span> /
               <span style="color:#ff8800">${sectorCounts.Engaged} available</span> /
               <span style="color:#666">${sectorCounts.Locked} locked</span>
             </span>
           </div>
-          ${bossesHtml}
+          ${subjectsHtml}
         </div>`;
     }
 
@@ -4225,9 +4285,26 @@ app.get("/admin/catalog/student", async (req, res) => {
     }
     .sector-title { font-weight: bold; color: #00f2ff; letter-spacing: 2px; }
     .sector-counts { font-size: 0.75em; color: #888; }
+    .subject-group {
+        margin-left: 20px;
+        border-left: 2px solid rgba(255, 0, 255, 0.2);
+    }
+    .subject-header {
+        padding: 10px 15px 4px;
+        background: rgba(255, 0, 255, 0.03);
+        border-top: 1px solid rgba(255, 0, 255, 0.15);
+    }
+    .subject-title {
+        font-weight: bold;
+        color: #ff00ff;
+        font-size: 0.85em;
+        letter-spacing: 2px;
+    }
     .boss-group {
         border-top: 1px solid #1a1d26;
         padding: 0;
+        margin-left: 20px;
+        border-left: 2px solid rgba(0, 242, 255, 0.15);
     }
     .boss-header {
         display: flex;
@@ -4238,7 +4315,7 @@ app.get("/admin/catalog/student", async (req, res) => {
     }
     .boss-name {
         font-weight: bold;
-        color: #00f2ff;
+        color: #ff00ff;
         font-size: 0.85em;
         letter-spacing: 1px;
     }
@@ -4462,56 +4539,89 @@ app.get("/admin/catalog/view", async (req, res) => {
       }
     }
 
-    // Build available table rows (with checkboxes and status picker)
-    let availableRows = "";
-    available.forEach((item, idx) => {
-      const value = JSON.stringify({
-        Sector: item["Sector"],
-        Subject: item["Subject"] || "",
-        Boss: item["Boss"],
-        Minion: item["Minion"],
-        Task: item["Task"] || "",
-        "Impact(1-3)": item["Impact(1-3)"],
-        "Locked for what?": item["Locked for what?"] || "",
-      }).replace(/"/g, "&quot;");
-      const subjectLabel = selectedSubjects.length > 1 ? `<td>${escHtml(item["Subject"] || item["Sector"])}</td>` : "";
-      availableRows += `<tr>
-        <td class="chk-cell"><input type="checkbox" name="items" value="${value}" class="item-chk" data-idx="${idx}"></td>
-        ${subjectLabel}
-        <td>${escHtml(item["Boss"])}</td>
-        <td title="${escHtml(item["Task"] || "")}">${escHtml(item["Minion"])}</td>
-        <td style="text-align:center">${escHtml(item["Impact(1-3)"])}</td>
-        <td class="status-cell">
-            <select name="status_${idx}" class="status-select" disabled>
-                <option value="Engaged" selected>Engaged (available)</option>
-                <option value="Locked">Locked (has prerequisite)</option>
-            </select>
-        </td>
-      </tr>`;
-    });
-
-    // Build assigned table rows (with checkboxes for removal)
-    let assignedRows = "";
-    for (let ai = 0; ai < assigned.length; ai++) {
-      const item = assigned[ai];
-      const statusColor = ({ Engaged: "#ff8800", Locked: "#666" })[item.studentStatus] || "#666";
-      const subjectLabel = selectedSubjects.length > 1 ? `<td>${escHtml(item["Subject"] || item["Sector"])}</td>` : "";
-      const removeValue = JSON.stringify({
-        Sector: item["Sector"],
-        Boss: item["Boss"],
-        Minion: item["Minion"],
-      }).replace(/"/g, "&quot;");
-      assignedRows += `<tr>
-        <td class="chk-cell"><input type="checkbox" name="removeItems" value="${removeValue}" class="remove-chk"></td>
-        ${subjectLabel}
-        <td>${escHtml(item["Boss"])}</td>
-        <td title="${escHtml(item["Task"] || "")}">${escHtml(item["Minion"])}</td>
-        <td style="text-align:center;color:${statusColor}">${escHtml(item.studentStatus)}</td>
-        <td style="text-align:center">${escHtml(item["Impact(1-3)"])}</td>
-      </tr>`;
+    // Group items by Sector → Boss for hierarchical display
+    function groupBySectorBoss(itemList) {
+      const grouped = {}; // { sector: { boss: [items] } }
+      for (const item of itemList) {
+        const sector = item["Sector"] || "General";
+        const boss = item["Boss"] || "Unknown";
+        if (!grouped[sector]) grouped[sector] = {};
+        if (!grouped[sector][boss]) grouped[sector][boss] = [];
+        grouped[sector][boss].push(item);
+      }
+      return grouped;
     }
 
-    const subjectTh = selectedSubjects.length > 1 ? "<th>Subject</th>" : "";
+    const availableGrouped = groupBySectorBoss(available);
+    const assignedGrouped = groupBySectorBoss(assigned);
+
+    // Build available rows grouped by Sector → Boss
+    let availableRows = "";
+    let availIdx = 0;
+    const sortedAvailSectors = Object.keys(availableGrouped).sort();
+    for (const sector of sortedAvailSectors) {
+      const bosses = availableGrouped[sector];
+      const sortedBosses = Object.keys(bosses).sort();
+      // Sector header row
+      const sectorItemCount = sortedBosses.reduce((sum, b) => sum + bosses[b].length, 0);
+      availableRows += `<tr class="sector-row"><td colspan="4"><span class="group-sector">${escHtml(sector)}</span> <span class="group-count">(${sectorItemCount})</span></td></tr>`;
+      for (const boss of sortedBosses) {
+        const bossItems = bosses[boss];
+        // Boss sub-header row
+        availableRows += `<tr class="boss-row"><td colspan="4"><span class="group-boss">${escHtml(boss)}</span> <span class="group-count">(${bossItems.length})</span></td></tr>`;
+        for (const item of bossItems) {
+          const value = JSON.stringify({
+            Sector: item["Sector"],
+            Subject: item["Subject"] || "",
+            Boss: item["Boss"],
+            Minion: item["Minion"],
+            Task: item["Task"] || "",
+            "Impact(1-3)": item["Impact(1-3)"],
+            "Locked for what?": item["Locked for what?"] || "",
+          }).replace(/"/g, "&quot;");
+          availableRows += `<tr>
+            <td class="chk-cell"><input type="checkbox" name="items" value="${value}" class="item-chk" data-idx="${availIdx}"></td>
+            <td title="${escHtml(item["Task"] || "")}">${escHtml(item["Minion"])}</td>
+            <td style="text-align:center">${escHtml(item["Impact(1-3)"])}</td>
+            <td class="status-cell">
+                <select name="status_${availIdx}" class="status-select" disabled>
+                    <option value="Engaged" selected>Engaged (available)</option>
+                    <option value="Locked">Locked (has prerequisite)</option>
+                </select>
+            </td>
+          </tr>`;
+          availIdx++;
+        }
+      }
+    }
+
+    // Build assigned rows grouped by Sector → Boss
+    let assignedRows = "";
+    const sortedAssignSectors = Object.keys(assignedGrouped).sort();
+    for (const sector of sortedAssignSectors) {
+      const bosses = assignedGrouped[sector];
+      const sortedBosses = Object.keys(bosses).sort();
+      const sectorItemCount = sortedBosses.reduce((sum, b) => sum + bosses[b].length, 0);
+      assignedRows += `<tr class="sector-row"><td colspan="4"><span class="group-sector">${escHtml(sector)}</span> <span class="group-count">(${sectorItemCount})</span></td></tr>`;
+      for (const boss of sortedBosses) {
+        const bossItems = bosses[boss];
+        assignedRows += `<tr class="boss-row"><td colspan="4"><span class="group-boss">${escHtml(boss)}</span> <span class="group-count">(${bossItems.length})</span></td></tr>`;
+        for (const item of bossItems) {
+          const statusColor = ({ Engaged: "#ff8800", Locked: "#666" })[item.studentStatus] || "#666";
+          const removeValue = JSON.stringify({
+            Sector: item["Sector"],
+            Boss: item["Boss"],
+            Minion: item["Minion"],
+          }).replace(/"/g, "&quot;");
+          assignedRows += `<tr>
+            <td class="chk-cell"><input type="checkbox" name="removeItems" value="${removeValue}" class="remove-chk"></td>
+            <td title="${escHtml(item["Task"] || "")}">${escHtml(item["Minion"])}</td>
+            <td style="text-align:center;color:${statusColor}">${escHtml(item.studentStatus)}</td>
+            <td style="text-align:center">${escHtml(item["Impact(1-3)"])}</td>
+          </tr>`;
+        }
+      }
+    }
     let successHtml = "";
     if (added > 0) successHtml += `<div class="success-msg">${added} objective${added > 1 ? "s" : ""} added to student sheet</div>`;
     if (removed > 0) successHtml += `<div class="success-msg" style="border-color:#ff4444;color:#ff4444;">${removed} objective${removed > 1 ? "s" : ""} removed from student sheet</div>`;
@@ -4592,6 +4702,31 @@ app.get("/admin/catalog/view", async (req, res) => {
     }
     .remove-chk { accent-color: #ff4444; width: 16px; height: 16px; cursor: pointer; }
     td[title]:not([title=""]) { cursor: help; border-bottom: 1px dotted #555; }
+    .sector-row td {
+        padding: 14px 12px 6px;
+        border-bottom: 1px solid #333;
+        background: rgba(0, 242, 255, 0.04);
+    }
+    .group-sector {
+        color: #00f2ff;
+        font-weight: bold;
+        font-size: 0.95em;
+        letter-spacing: 3px;
+    }
+    .group-count {
+        color: #555;
+        font-size: 0.8em;
+        letter-spacing: 1px;
+    }
+    .boss-row td {
+        padding: 8px 12px 4px 24px;
+        border-bottom: none;
+    }
+    .group-boss {
+        color: #ff00ff;
+        font-size: 0.85em;
+        letter-spacing: 2px;
+    }
     </style>
 </head>
 <body>
@@ -4616,7 +4751,7 @@ app.get("/admin/catalog/view", async (req, res) => {
                 <button type="submit" class="btn" id="submitBtn" disabled>ADD SELECTED TO STUDENT SHEET</button>
             </div>
             <table class="obj-table">
-                <thead><tr><th></th>${subjectTh}<th>Boss (Topic)</th><th>Minion (Objective)</th><th>Impact</th><th>Add As</th></tr></thead>
+                <thead><tr><th></th><th>Minion (Objective)</th><th>Impact</th><th>Add As</th></tr></thead>
                 <tbody>${availableRows}</tbody>
             </table>
         </form>
@@ -4635,7 +4770,7 @@ app.get("/admin/catalog/view", async (req, res) => {
                 <button type="submit" class="btn btn-red" id="removeBtn" disabled>REMOVE SELECTED</button>
             </div>
             <table class="obj-table assigned-table">
-                <thead><tr><th></th>${subjectTh}<th>Boss (Topic)</th><th>Minion (Objective)</th><th>Status</th><th>Impact</th></tr></thead>
+                <thead><tr><th></th><th>Minion (Objective)</th><th>Status</th><th>Impact</th></tr></thead>
                 <tbody>${assignedRows}</tbody>
             </table>
         </form>
@@ -5033,7 +5168,7 @@ app.post("/admin/catalog/add", async (req, res) => {
     // Update catalog "In Henry's Sheet" column
     const catalogRes = await sheets.spreadsheets.values.get({
       spreadsheetId: CATALOG_SPREADSHEET_ID,
-      range: "Catalog",
+      range: "Catalog!A:Z",
     });
     const catValues = catalogRes.data.values || [];
     const catHeaders = catValues[0] || [];
@@ -5146,7 +5281,7 @@ app.post("/admin/catalog/remove", async (req, res) => {
       // Update catalog "In Henry's Sheet" back to "No" for removed items
       const catalogRes = await sheets.spreadsheets.values.get({
         spreadsheetId: CATALOG_SPREADSHEET_ID,
-        range: "Catalog",
+        range: "Catalog!A:Z",
       });
       const catValues = catalogRes.data.values || [];
       const catHeaders = catValues[0] || [];

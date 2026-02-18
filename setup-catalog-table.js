@@ -70,7 +70,7 @@ async function main() {
   console.log("Reading catalog data...");
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: CATALOG_ID,
-    range: "Catalog",
+    range: "Catalog!A:Z",
   });
   const allRows = res.data.values || [];
   const headers = allRows[0];
@@ -132,7 +132,7 @@ async function main() {
   // Clear existing data first
   await sheets.spreadsheets.values.clear({
     spreadsheetId: CATALOG_ID,
-    range: "Catalog",
+    range: "Catalog!A:Z",
   });
 
   // Write new data

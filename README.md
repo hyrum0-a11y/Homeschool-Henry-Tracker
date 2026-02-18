@@ -34,8 +34,9 @@ A gamified homeschool progress tracker that turns learning objectives into a vid
 - Hearts and orbs sorted by conquest rate (highest first, then alphabetical)
 
 ### Objective Catalog
-- Browse subjects, assign objectives to students
-- Update and manage locked/engaged/enslaved statuses
+- **Subject picker** grouped by Sector, with subject cards nested within each sector
+- **Objective view** grouped hierarchically: Sector → Boss → Minions
+- **Manage Student Items** grouped by Sector → Subject → Boss with visual indentation and colored left-border accents
 - Student Task column is authoritative (protected from catalog overrides)
 - Removal warning about impact on total possible points
 - Multi-select quest adding with batch submission
@@ -59,6 +60,7 @@ A gamified homeschool progress tracker that turns learning objectives into a vid
 - Row builder pattern: `valueMap` + `headers.map((h) => valueMap[h] ?? "")`
 - Composite key matching: `Sector|Boss|Minion` for cross-sheet identification
 - Template placeholder system: `html.split("[[PLACEHOLDER]]").join(value)`
+- Catalog data fetched with explicit range `Catalog!A:Z` (not bare sheet name) to ensure all rows are returned regardless of Google Sheets table/filter boundaries
 
 ## Status Definitions
 
@@ -103,11 +105,13 @@ npm start
 Then open http://localhost:3000
 
 ### One-Time Setup Scripts
-- `setup-drive.js` — Creates Google Drive folder structure
+- `setup-drive.js` — Creates Google Drive folder structure and Master Catalog spreadsheet
 - `setup-catalog-table.js` — Adds Subject column and formats catalog as a Google Sheets table
-- `fix-catalog-filter.js` — Re-expands catalog table filter after adding rows
-- `backfill-subject.js` — Backfills Subject column for existing rows
-- `backfill-task.js` — Backfills Task column for existing rows
+- `fix-catalog-filter.js` — Re-expands catalog table filter/banding after adding rows manually
+- `fix-formulas.js` — Updates stat formulas to header-resilient INDEX/MATCH format
+- `fix-task-validation.js` — Removes data validation dropdowns from the Task column
+- `backfill-subject.js` — Backfills Subject column for existing Sectors rows from catalog
+- `backfill-task.js` — Backfills Task column for existing Sectors rows from catalog
 
 ### Sectors Sheet Setup
 Ensure the Sectors sheet has these columns in the header row:
@@ -125,9 +129,9 @@ Ensure the Sectors sheet has these columns in the header row:
 | `/admin` | Parent admin console |
 | `/admin/quests` | Quest approval (approve, reject, reopen, sync) |
 | `/admin/import` | AI photo import |
-| `/admin/catalog` | Subject picker (objective catalog) |
-| `/admin/catalog/view` | Browse and remove objectives by subject |
-| `/admin/catalog/student` | Manage student items and survival mode toggles |
+| `/admin/catalog` | Subject picker grouped by sector |
+| `/admin/catalog/view` | Browse and assign/remove objectives (grouped by Sector → Boss) |
+| `/admin/catalog/student` | Manage student items (Sector → Subject → Boss hierarchy) |
 | `/admin/catalog/locked` | Manage locked items and prerequisites |
 | `/admin/catalog/generate` | AI objective generation |
 

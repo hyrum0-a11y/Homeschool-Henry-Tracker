@@ -57,7 +57,7 @@ async function main() {
   console.log("Reading Master Catalog...");
   const catalogRes = await sheets.spreadsheets.values.get({
     spreadsheetId: CATALOG_SPREADSHEET_ID,
-    range: "Catalog",
+    range: "Catalog!A:Z",
   });
   const catValues = catalogRes.data.values || [];
   const catHeaders = catValues[0] || [];

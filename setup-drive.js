@@ -145,8 +145,10 @@ async function main() {
   // Catalog columns
   const catalogHeaders = [
     "Sector",
+    "Subject",
     "Boss",
     "Minion",
+    "Task",
     "Status",
     "Impact(1-3)",
     "Locked for what?",
@@ -160,15 +162,17 @@ async function main() {
     const get = (col) => (colIdx[col] !== undefined ? row[colIdx[col]] || "" : "");
     return [
       get("Sector"),
+      get("Subject"),
       get("Boss"),
       get("Minion"),
+      get("Task"),
       get("Status"),
       get("Impact(1-3)"),
       get("Locked for what?"),
       "",  // Suggested Proof Method — empty for now
       "High School",  // Grade Level — default per user's plan
       "Yes",  // In Henry's Sheet — all copied rows are from Henry's sheet
-      row[colIdx["Locked for what?"] + 1] || "",  // Source (the column after "Locked for what?")
+      "",  // Source
     ];
   });
 

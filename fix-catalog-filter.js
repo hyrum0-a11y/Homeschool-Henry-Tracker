@@ -27,7 +27,7 @@ async function main() {
   });
   const sheets = google.sheets({ version: "v4", auth });
 
-  const dataRes = await sheets.spreadsheets.values.get({ spreadsheetId: CATALOG_ID, range: "Catalog" });
+  const dataRes = await sheets.spreadsheets.values.get({ spreadsheetId: CATALOG_ID, range: "Catalog!A:Z" });
   const totalRows = dataRes.data.values.length;
   const totalCols = dataRes.data.values[0].length;
   console.log("Data size:", totalRows, "rows x", totalCols, "cols");

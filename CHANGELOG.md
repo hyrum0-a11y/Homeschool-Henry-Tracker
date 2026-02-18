@@ -1,5 +1,20 @@
 # Changelog
 
+## [2.1.0] - 2025-02-17
+
+### Added
+- **Sector → Subject → Boss hierarchy** on Manage Student Items page with visual indentation and colored left-border accents
+- **Sector-grouped subject picker** on Objective Catalog page — subjects nested within sector cards showing sector-level progress
+- **Sector → Boss grouping** on catalog view page — replaces flat table with hierarchical sector/boss group headers
+
+### Fixed
+- **Catalog data range** — Changed all `range: "Catalog"` to `range: "Catalog!A:Z"` across server.js and all helper scripts to ensure new rows added outside the Google Sheets table/filter boundary are always returned by the API
+- **Subject mislabeling on Manage Student Items** — Sector header previously used the Subject from only the first boss, causing all items in a sector to appear under one subject name
+
+### Changed
+- Catalog view tables no longer have Boss/Subject columns — these are now visual group headers with item counts
+- Manage Student Items always shows the Subject sub-header for consistent hierarchy
+
 ## [2.0.0] - 2025-02-16
 
 ### Added
