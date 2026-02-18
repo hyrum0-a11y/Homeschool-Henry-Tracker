@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.5.0] - 2025-02-18
+
+### Added
+- **Quest date tracking** — New `Date Quest Added` and `Date Quest Completed` columns in Sectors sheet are automatically populated: date added when quest starts, date completed when parent approves, both cleared when quest is abandoned
+
+### Changed
+- **`updateSectorsQuestStatus` helper** — Now handles multi-column date tracking with support for columns beyond Z (AA, AB, etc.)
+- **`buildSectorsRow`** — Includes empty `Date Quest Added` / `Date Quest Completed` columns for new rows
+
 ## [2.4.0] - 2025-02-18
 
 ### Added

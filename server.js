@@ -209,21 +209,48 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
   const sectorCol = headers.indexOf("Sector");
   const bossCol = headers.indexOf("Boss");
   const minionCol = headers.indexOf("Minion");
+  const dateAddedCol = headers.indexOf("Date Quest Added");
+  const dateCompletedCol = headers.indexOf("Date Quest Completed");
 
   if (questStatusCol < 0 || sectorCol < 0 || bossCol < 0 || minionCol < 0) return;
+
+  const colLetter = (idx) => {
+    if (idx < 26) return String.fromCharCode(65 + idx);
+    return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
+  };
+
+  const now = new Date().toISOString().slice(0, 10);
 
   const updates = [];
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][sectorCol] === sector && rows[i][bossCol] === boss && rows[i][minionCol] === minion) {
       const rowNum = i + 1; // 1-based for Sheets API
-      const qCol = String.fromCharCode(65 + questStatusCol);
-      updates.push({ range: `Sectors!${qCol}${rowNum}`, values: [[questStatus]] });
+      updates.push({ range: `Sectors!${colLetter(questStatusCol)}${rowNum}`, values: [[questStatus]] });
 
       // Auto-enslave when approved
       if (questStatus === "Approved" && statusCol >= 0) {
-        const sCol = String.fromCharCode(65 + statusCol);
-        updates.push({ range: `Sectors!${sCol}${rowNum}`, values: [["Enslaved"]] });
+        updates.push({ range: `Sectors!${colLetter(statusCol)}${rowNum}`, values: [["Enslaved"]] });
+        // Set Date Quest Completed
+        if (dateCompletedCol >= 0) {
+          updates.push({ range: `Sectors!${colLetter(dateCompletedCol)}${rowNum}`, values: [[now]] });
+        }
       }
+
+      // Quest added to board — set Date Quest Added
+      if (questStatus === "Active" && dateAddedCol >= 0) {
+        updates.push({ range: `Sectors!${colLetter(dateAddedCol)}${rowNum}`, values: [[now]] });
+      }
+
+      // Quest removed/abandoned — clear both dates
+      if (questStatus === "" || questStatus === "Abandoned") {
+        if (dateAddedCol >= 0) {
+          updates.push({ range: `Sectors!${colLetter(dateAddedCol)}${rowNum}`, values: [[""]] });
+        }
+        if (dateCompletedCol >= 0) {
+          updates.push({ range: `Sectors!${colLetter(dateCompletedCol)}${rowNum}`, values: [[""]] });
+        }
+      }
+
       break;
     }
   }
@@ -1784,6 +1811,8 @@ function buildSectorsRow(headers, data) {
     "Impact(1-3)": data.impact,
     "Survival Mode Required": "",
     "Quest Status": "",
+    "Date Quest Added": "",
+    "Date Quest Completed": "",
   };
   for (const stat of statNames) {
     valueMap[stat] = statFormula(stat);
