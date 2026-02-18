@@ -3320,17 +3320,107 @@ app.get("/progress", async (req, res) => {
     const questInProgressCurrent = activeQuests.length + submittedQuests.length;
     const questInProgressSeries = days30.map(() => questInProgressCurrent);
 
-    // SVG sparkline bar builder
-    function buildSparkBars(series, color, maxOverride) {
-      const w = 150;
-      const h = 30;
+    // 7. Guardian Minion Enslaved % (for Survival Mode section)
+    const totalGuardianMinions = allMinions.filter((m) => {
+      return survivalBosses.some((b) => b.sector === m["Sector"] && b.boss === m["Boss"]);
+    }).length;
+    const guardianMinionCompleteDates = allMinions
+      .filter((m) => {
+        if (m["Status"] !== "Enslaved") return false;
+        return survivalBosses.some((b) => b.sector === m["Sector"] && b.boss === m["Boss"]);
+      })
+      .map((m) => (m["Date Quest Completed"] || "").slice(0, 10))
+      .filter(Boolean)
+      .sort();
+    const guardianMinionsWithDates = guardianMinionCompleteDates.length;
+    const guardianMinionEnslaved = allMinions.filter((m) => {
+      return m["Status"] === "Enslaved" && survivalBosses.some((b) => b.sector === m["Sector"] && b.boss === m["Boss"]);
+    }).length;
+    const guardianMinionsNoDates = guardianMinionEnslaved - guardianMinionsWithDates;
+    const guardianMinionPctSeries = days30.map((d) => {
+      const count = countUpTo(guardianMinionCompleteDates, d) + guardianMinionsNoDates;
+      return totalGuardianMinions > 0 ? Math.round((count / totalGuardianMinions) * 100) : 0;
+    });
+
+    // 8. Boss Conquest % (all bosses, % fully conquered by day)
+    const bossConquestPctSeries = days30.map((d) => {
+      const conqueredByDay = countUpTo(bossCompleteDates, d) + bossesNoDates;
+      return totalBosses > 0 ? Math.round((conqueredByDay / totalBosses) * 100) : 0;
+    });
+
+    // SVG daily bar chart builder for progress sections (larger format with title + y-axis)
+    function buildDailyChart(series, color, chartTitle, yAxisLabel, maxOverride) {
+      const chartW = 700;
+      const chartH = 180;
+      const padL = 45;
+      const padR = 10;
+      const padT = 25;
+      const padB = 22;
+      const plotW = chartW - padL - padR;
+      const plotH = chartH - padT - padB;
       const maxV = maxOverride != null ? maxOverride : Math.max(...series, 1);
-      const barW = w / series.length;
-      let svg = `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;margin:6px auto 0;">`;
+      const barW = plotW / series.length;
+
+      let svg = `<svg width="100%" viewBox="0 0 ${chartW} ${chartH}" xmlns="http://www.w3.org/2000/svg" style="max-width:${chartW}px;">`;
+
+      // Title
+      svg += `<text x="${chartW / 2}" y="15" fill="${color}" font-size="10" text-anchor="middle" font-family="'Courier New',monospace" letter-spacing="2">${chartTitle}</text>`;
+
+      // Y-axis label (vertical)
+      svg += `<text x="10" y="${padT + plotH / 2}" fill="#555" font-size="8" text-anchor="middle" font-family="'Courier New',monospace" transform="rotate(-90, 10, ${padT + plotH / 2})">${yAxisLabel}</text>`;
+
+      // Grid lines + y labels
+      for (let i = 0; i <= 4; i++) {
+        const y = padT + plotH - (i / 4) * plotH;
+        const val = Math.round((i / 4) * maxV);
+        svg += `<line x1="${padL}" y1="${y}" x2="${chartW - padR}" y2="${y}" stroke="rgba(255,255,255,0.08)" stroke-width="1"/>`;
+        svg += `<text x="${padL - 5}" y="${y + 3}" fill="#555" font-size="8" text-anchor="end" font-family="monospace">${val}</text>`;
+      }
+
+      // Bars
       for (let i = 0; i < series.length; i++) {
-        const barH = maxV > 0 ? (series[i] / maxV) * h : 0;
-        const x = i * barW;
-        const y = h - barH;
+        const barH = maxV > 0 ? (series[i] / maxV) * plotH : 0;
+        const x = padL + i * barW;
+        const y = padT + plotH - barH;
+        const opacity = i === series.length - 1 ? 1 : 0.6;
+        svg += `<rect x="${x}" y="${y}" width="${Math.max(barW - 1, 2)}" height="${barH}" fill="${color}" opacity="${opacity}" rx="1">`;
+        svg += `<title>${days30[i]}: ${series[i]}${maxOverride === 100 ? '%' : ''}</title></rect>`;
+      }
+
+      // X-axis labels (every 5 days)
+      for (let i = 0; i < series.length; i += 5) {
+        const x = padL + i * barW + barW / 2;
+        svg += `<text x="${x}" y="${chartH - 5}" fill="#555" font-size="7" text-anchor="middle" font-family="monospace">${days30[i].slice(5)}</text>`;
+      }
+      // Last day label
+      const lastX = padL + (series.length - 1) * barW + barW / 2;
+      svg += `<text x="${lastX}" y="${chartH - 5}" fill="#888" font-size="7" text-anchor="middle" font-family="monospace">${days30[series.length - 1].slice(5)}</text>`;
+
+      svg += `</svg>`;
+      return svg;
+    }
+
+    // SVG sparkline bar builder with title and y-axis label
+    function buildSparkBars(series, color, maxOverride, title, yLabel) {
+      const w = 220;
+      const h = 80;
+      const padL = yLabel ? 18 : 0;
+      const padT = title ? 14 : 0;
+      const plotW = w - padL;
+      const plotH = h - padT;
+      const maxV = maxOverride != null ? maxOverride : Math.max(...series, 1);
+      const barW = plotW / series.length;
+      let svg = `<svg width="100%" viewBox="0 0 ${w} ${h}" style="display:block;margin:6px auto 0;max-width:${w}px;">`;
+      if (title) {
+        svg += `<text x="${padL + plotW / 2}" y="10" fill="${color}" font-size="7" text-anchor="middle" font-family="'Courier New',monospace" letter-spacing="1.5" opacity="0.9">${title}</text>`;
+      }
+      if (yLabel) {
+        svg += `<text x="5" y="${padT + plotH / 2}" fill="#555" font-size="6" text-anchor="middle" font-family="'Courier New',monospace" transform="rotate(-90, 5, ${padT + plotH / 2})">${yLabel}</text>`;
+      }
+      for (let i = 0; i < series.length; i++) {
+        const barH = maxV > 0 ? (series[i] / maxV) * plotH : 0;
+        const x = padL + i * barW;
+        const y = padT + plotH - barH;
         const opacity = i === series.length - 1 ? 1 : 0.5;
         svg += `<rect x="${x}" y="${y}" width="${Math.max(barW - 0.5, 1)}" height="${barH}" fill="${color}" opacity="${opacity}" rx="0.5"><title>${days30[i]}: ${series[i]}</title></rect>`;
       }
@@ -3509,42 +3599,19 @@ app.get("/progress", async (req, res) => {
         </div>`;
     }
 
-    // Boss conquest bars (top bosses by completion)
-    const sortedBosses = [...allBosses].sort((a, b) => {
-      const aPct = a.total > 0 ? a.enslaved / a.total : 0;
-      const bPct = b.total > 0 ? b.enslaved / b.total : 0;
-      return bPct - aPct;
-    });
-    let bossConquestHtml = "";
-    for (const b of sortedBosses.slice(0, 15)) {
-      const pct = b.total > 0 ? Math.round((b.enslaved / b.total) * 100) : 0;
-      const barColor = pct >= 100 ? "#00ff9d" : b.isSurvival ? "#ff4444" : "#ff6600";
-      const shieldMark = b.isSurvival ? `<span style="color:#ff4444;" title="Survival Guardian">&#x1F6E1;</span> ` : "";
-      bossConquestHtml += `
-        <div class="boss-prog-row">
-          <span class="boss-prog-name">${shieldMark}${escHtml(b.boss)}</span>
-          <div class="boss-prog-bar"><div class="boss-prog-fill" style="width:${pct}%;background:${barColor};"></div></div>
-          <span class="boss-prog-pct">${pct}%</span>
-        </div>`;
-    }
+    // Boss conquest daily % chart
+    const currentBossPct = totalBosses > 0 ? Math.round((completedBosses.length / totalBosses) * 100) : 0;
+    const bossConquestHtml = `
+      <div style="text-align:center;color:#888;font-size:0.65em;margin-bottom:6px;">${completedBosses.length}/${totalBosses} BOSSES FULLY CONQUERED (${currentBossPct}%)</div>
+      <div style="overflow-x:auto;">${buildDailyChart(bossConquestPctSeries, "#ff6600", "BOSS CONQUEST — DAILY %", "% CONQUERED", 100)}</div>`;
 
-    // Survival ring progress
+    // Survival mode daily % chart
+    const currentGuardianMinionPct = totalGuardianMinions > 0 ? Math.round((guardianMinionEnslaved / totalGuardianMinions) * 100) : 0;
     let survivalHtml = "";
     if (survivalBosses.length > 0) {
-      for (const b of survivalBosses.sort((a, b) => {
-        const aPct = a.total > 0 ? a.enslaved / a.total : 0;
-        const bPct = b.total > 0 ? b.enslaved / b.total : 0;
-        return bPct - aPct;
-      })) {
-        const pct = b.total > 0 ? Math.round((b.enslaved / b.total) * 100) : 0;
-        const barColor = pct >= 100 ? "#00ff9d" : "#ff4444";
-        survivalHtml += `
-          <div class="boss-prog-row">
-            <span class="boss-prog-name">&#x1F6E1; ${escHtml(b.boss)}</span>
-            <div class="boss-prog-bar"><div class="boss-prog-fill" style="width:${pct}%;background:${barColor};"></div></div>
-            <span class="boss-prog-pct">${pct}%</span>
-          </div>`;
-      }
+      survivalHtml = `
+        <div style="text-align:center;color:#888;font-size:0.65em;margin-bottom:6px;">${guardianMinionEnslaved}/${totalGuardianMinions} GUARDIAN MINIONS ENSLAVED (${currentGuardianMinionPct}%)</div>
+        <div style="overflow-x:auto;">${buildDailyChart(guardianMinionPctSeries, "#ff4444", "GUARDIAN MINIONS ENSLAVED — DAILY %", "% ENSLAVED", 100)}</div>`;
     }
 
     // Timeline
@@ -3802,32 +3869,32 @@ app.get("/progress", async (req, res) => {
             <div class="summary-card">
                 <div class="summary-value" style="color:#00ff9d;">${totalEnslaved}</div>
                 <div class="summary-label">MINIONS ENSLAVED</div>
-                ${buildSparkBars(enslavedSeries, "#00ff9d")}
+                ${buildSparkBars(enslavedSeries, "#00ff9d", null, "MINIONS ENSLAVED", "COUNT")}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#ffea00;">${overallPct}%</div>
                 <div class="summary-label">OVERALL CONQUEST</div>
-                ${buildSparkBars(conquestSeries, "#ffea00", 100)}
+                ${buildSparkBars(conquestSeries, "#ffea00", 100, "OVERALL CONQUEST", "%")}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#ff6600;">${completedBosses.length}/${totalBosses}</div>
                 <div class="summary-label">BOSSES CONQUERED</div>
-                ${buildSparkBars(bossSeries, "#ff6600", totalBosses)}
+                ${buildSparkBars(bossSeries, "#ff6600", totalBosses, "BOSSES CONQUERED", "COUNT")}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#ff4444;">${completedSurvival}/${survivalBosses.length}</div>
                 <div class="summary-label">GUARDIANS DEFEATED</div>
-                ${buildSparkBars(guardianSeries, "#ff4444", survivalBosses.length)}
+                ${buildSparkBars(guardianSeries, "#ff4444", survivalBosses.length, "GUARDIANS DEFEATED", "COUNT")}
             </div>
             <div class="summary-card">
-                <div class="summary-value" style="color:#ff00ff;">${approvedQuests.length}</div>
-                <div class="summary-label">QUESTS COMPLETED</div>
-                ${buildSparkBars(questCompleteSeries, "#ff00ff")}
+                <div class="summary-value" style="color:#ff00ff;">${totalEnslaved}</div>
+                <div class="summary-label">MINIONS ENSLAVED</div>
+                ${buildSparkBars(enslavedSeries, "#ff00ff", null, "MINIONS ENSLAVED", "COUNT")}
             </div>
             <div class="summary-card">
                 <div class="summary-value" style="color:#00f2ff;">${questInProgressCurrent}</div>
                 <div class="summary-label">QUESTS IN PROGRESS</div>
-                ${buildSparkBars(questInProgressSeries, "#00f2ff")}
+                ${buildSparkBars(questInProgressSeries, "#00f2ff", null, "QUESTS IN PROGRESS", "COUNT")}
             </div>
         </div>
 
@@ -3844,12 +3911,12 @@ app.get("/progress", async (req, res) => {
         </div>
 
         <div class="progress-section">
-            <h2>&#x1F6E1; SURVIVAL MODE PROGRESS (${completedSurvival}/${survivalBosses.length} GUARDIANS)</h2>
+            <h2>&#x1F6E1; SURVIVAL MODE PROGRESS</h2>
             ${survivalHtml || '<div style="text-align:center;color:#555;padding:10px;">NO SURVIVAL BOSSES FOUND</div>'}
         </div>
 
         <div class="progress-section">
-            <h2>&#x1F451; BOSS CONQUEST (TOP 15)</h2>
+            <h2>&#x1F451; BOSS CONQUEST</h2>
             ${bossConquestHtml}
         </div>
 
