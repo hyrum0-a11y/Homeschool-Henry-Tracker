@@ -614,7 +614,7 @@ function processAllData(html, data, activeQuestKeys) {
 
     survivalRingHtml = `
       <div class="survival-ring${allGuardiansComplete ? ' survival-achieved' : ''}">
-        <div class="survival-ring-title">${shieldIcon} RING OF GUARDIANS</div>
+        <a class="survival-ring-title" href="/guardians">${shieldIcon} RING OF GUARDIANS</a>
         <div class="guardian-ring">${orbsHtml}</div>
         <div class="survival-summary">${overallPct}% GUARDIAN PROTOCOL COMPLETE</div>
       </div>`;
@@ -1245,10 +1245,22 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         letter-spacing: 3px;
         margin-bottom: 15px;
         text-shadow: 0 0 8px rgba(255, 68, 68, 0.5);
+        text-decoration: none;
+        display: block;
+        cursor: pointer;
+        transition: color 0.2s, text-shadow 0.2s;
+    }
+    .survival-ring-title:hover {
+        color: #ffea00;
+        text-shadow: 0 0 12px rgba(255, 234, 0, 0.6);
     }
     .survival-achieved .survival-ring-title {
         color: #ffd700;
         text-shadow: 0 0 8px rgba(255, 215, 0, 0.5);
+    }
+    .survival-achieved .survival-ring-title:hover {
+        color: #ffea00;
+        text-shadow: 0 0 12px rgba(255, 234, 0, 0.8);
     }
     .guardian-ring {
         display: flex;
@@ -1410,9 +1422,12 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 // ---------------------------------------------------------------------------
 // Boss Detail Page Template
 // ---------------------------------------------------------------------------
-function buildBossPage(bossName, sector, minions, totals, activeQuestKeys) {
+function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSurvivalBoss) {
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+  const survivalBadge = isSurvivalBoss
+    ? `<div class="survival-badge"><svg width="14" height="16" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:3px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg> SURVIVAL MODE GUARDIAN</div>`
+    : "";
 
   let rows = "";
   for (const m of minions) {
@@ -1482,6 +1497,14 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys) {
         letter-spacing: 2px;
         margin-bottom: 20px;
     }
+    .survival-badge {
+        text-align: center;
+        color: #ff4444;
+        font-size: 0.7em;
+        letter-spacing: 3px;
+        margin-bottom: 5px;
+        text-shadow: 0 0 8px rgba(255, 68, 68, 0.4);
+    }
     .back-link {
         display: inline-block;
         color: #00f2ff;
@@ -1545,6 +1568,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys) {
     <div class="hud-container">
         <a class="back-link" href="/">&lt; BACK TO HUD</a>
         <h1>${bossName}</h1>
+        ${survivalBadge}
         <div class="sector-tag">SECTOR: ${sector}</div>
         <table>
             <thead>
@@ -1835,6 +1859,18 @@ app.get("/boss/:bossName", async (req, res) => {
       rep: getStat(commandCenter, "Reputation").totalPossible,
     };
 
+    // Detect survival boss
+    let survivalCol = null;
+    if (allMinions.length > 0) {
+      survivalCol = Object.keys(allMinions[0]).find((k) => k.toLowerCase().includes("survival"));
+    }
+    let isSurvivalBoss = false;
+    if (survivalCol) {
+      isSurvivalBoss = allMinions.some(
+        (r) => r["Boss"] === bossName && (!sector || r["Sector"] === sector) && (r[survivalCol] || "").toUpperCase() === "X"
+      );
+    }
+
     // Fetch active quests to mark already-queued minions
     let activeQuestKeys = new Set();
     try {
@@ -1844,7 +1880,7 @@ app.get("/boss/:bossName", async (req, res) => {
       }
     } catch {}
 
-    res.send(buildBossPage(bossName, sector, minions, totals, activeQuestKeys));
+    res.send(buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSurvivalBoss));
   } catch (err) {
     console.error("Boss page error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
@@ -1854,9 +1890,11 @@ app.get("/boss/:bossName", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Sector Detail Page — shows all bosses in a sector with their minion tables
 // ---------------------------------------------------------------------------
-function buildSectorPage(sectorName, bosses, totals, activeQuestKeys) {
+function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBossNames) {
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+  const survivalSet = survivalBossNames || new Set();
+  const shieldSvg = `<svg width="14" height="16" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:3px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg>`;
 
   let bossBlocks = "";
   for (const { bossName, minions } of bosses) {
@@ -1892,9 +1930,10 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys) {
         </tr>`;
     }
 
+    const isSurvival = survivalSet.has(bossName);
     bossBlocks += `
-      <div class="boss-block">
-        <h2><a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sectorName)}" class="boss-link">${escHtml(bossName)}</a></h2>
+      <div class="boss-block${isSurvival ? ' survival-boss' : ''}">
+        <h2><a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sectorName)}" class="boss-link">${isSurvival ? shieldSvg + ' ' : ''}${escHtml(bossName)}</a>${isSurvival ? '<span class="survival-tag">GUARDIAN</span>' : ''}</h2>
         <table>
           <thead>
             <tr><th></th><th>Minion</th><th>Status</th><th>INT</th><th>STA</th><th>TMP</th><th>REP</th><th>IMP</th><th>TOTAL</th></tr>
@@ -1925,8 +1964,14 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys) {
     .sector-tag { text-align: center; font-size: 0.7em; color: #888; letter-spacing: 3px; margin-bottom: 30px; }
     .boss-block { margin-bottom: 35px; }
     .boss-block h2 { color: #ff6600; font-size: 1em; letter-spacing: 3px; margin-bottom: 8px; text-shadow: 0 0 8px rgba(255,102,0,0.3); }
+    .boss-block.survival-boss { border-left: 3px solid rgba(255, 68, 68, 0.4); padding-left: 12px; }
     .boss-link { color: #ff6600; text-decoration: none; }
     .boss-link:hover { text-decoration: underline; color: #ffea00; }
+    .survival-tag {
+        font-size: 0.6em; color: #ff4444; letter-spacing: 2px; margin-left: 10px;
+        border: 1px solid rgba(255, 68, 68, 0.4); padding: 2px 6px; vertical-align: middle;
+        text-shadow: 0 0 6px rgba(255, 68, 68, 0.3);
+    }
     table { width: 100%; border-collapse: collapse; font-size: 0.8em; margin-bottom: 10px; }
     th { padding: 8px; text-align: left; border-bottom: 2px solid #00f2ff; }
     td { padding: 8px; border-bottom: 1px solid #1a1d26; }
@@ -2027,6 +2072,20 @@ app.get("/sector/:sectorName", async (req, res) => {
       rep: getStat(commandCenter, "Reputation").totalPossible,
     };
 
+    // Detect survival bosses in this sector
+    let survivalCol = null;
+    if (allMinions.length > 0) {
+      survivalCol = Object.keys(allMinions[0]).find((k) => k.toLowerCase().includes("survival"));
+    }
+    const survivalBossNames = new Set();
+    if (survivalCol) {
+      for (const r of allMinions) {
+        if (r["Sector"] === sectorName && (r[survivalCol] || "").toUpperCase() === "X") {
+          survivalBossNames.add(r["Boss"]);
+        }
+      }
+    }
+
     // Group by boss
     const bossMap = {};
     for (const m of sectorMinions) {
@@ -2045,9 +2104,261 @@ app.get("/sector/:sectorName", async (req, res) => {
       }
     } catch {}
 
-    res.send(buildSectorPage(sectorName, bosses, totals, activeQuestKeys));
+    res.send(buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBossNames));
   } catch (err) {
     console.error("Sector page error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Guardians Page — shows all survival-mode bosses with their minions
+// ---------------------------------------------------------------------------
+function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
+  const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
+  const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+
+  const shieldSvg = `<svg width="14" height="16" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:3px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg>`;
+
+  let bossBlocks = "";
+  for (const { bossName, sector, minions } of bosses) {
+    let rows = "";
+    for (const m of minions) {
+      const sc = statusColor[m["Status"]] || "#555";
+      const nInt = norm(m["INTELLIGENCE"], totals.intel);
+      const nSta = norm(m["STAMINA"], totals.stamina);
+      const nTmp = norm(m["TEMPO"], totals.tempo);
+      const nRep = norm(m["REPUTATION"], totals.rep);
+      const nTotal = (parseFloat(nInt) + parseFloat(nSta) + parseFloat(nTmp) + parseFloat(nRep)).toFixed(1);
+      const qKey = bossName + "|" + m["Minion"];
+      const onQuest = activeQuestKeys && activeQuestKeys.has(qKey);
+      let questBtn;
+      if (onQuest) {
+        questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
+      } else if (m["Status"] === "Engaged") {
+        questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}" title="Select for quest board">`;
+      } else {
+        questBtn = `<span style="opacity:0.2;">-</span>`;
+      }
+      rows += `
+        <tr>
+          <td>${questBtn}</td>
+          <td title="${escHtml(m["Task"] || "")}">${escHtml(m["Minion"])}</td>
+          <td style="color:${sc}; font-weight:bold;">${m["Status"]}</td>
+          <td>${nInt}</td>
+          <td>${nSta}</td>
+          <td>${nTmp}</td>
+          <td>${nRep}</td>
+          <td>${m["Impact(1-3)"] || ""}</td>
+          <td style="color:#ffea00; font-weight:bold;">${nTotal}</td>
+        </tr>`;
+    }
+
+    const enslaved = minions.filter((m) => m["Status"] === "Enslaved").length;
+    const total = minions.length;
+    const pct = total > 0 ? Math.round((enslaved / total) * 100) : 0;
+    const pctColor = pct >= 100 ? "#00ff9d" : pct > 0 ? "#ff6600" : "#555";
+
+    bossBlocks += `
+      <div class="boss-block">
+        <h2>
+          <a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sector)}" class="boss-link">
+            ${shieldSvg} ${escHtml(bossName)}
+          </a>
+          <span class="boss-sector-tag">${escHtml(sector)}</span>
+          <span class="boss-pct" style="color:${pctColor};">${pct}%</span>
+        </h2>
+        <table>
+          <thead>
+            <tr><th></th><th>Minion</th><th>Status</th><th>INT</th><th>STA</th><th>TMP</th><th>REP</th><th>IMP</th><th>TOTAL</th></tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`;
+  }
+
+  return `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Ring of Guardians - Sovereign HUD</title>
+    <style>
+    body {
+        background: #0a0b10;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        margin: 0; padding: 20px;
+        text-transform: uppercase;
+    }
+    .hud-container { max-width: 900px; margin: 0 auto; }
+    .back-link { color: #00f2ff; text-decoration: none; font-size: 0.75em; letter-spacing: 2px; }
+    .back-link:hover { text-decoration: underline; }
+    h1 { color: #ff4444; text-align: center; margin: 20px 0 5px 0; text-shadow: 0 0 15px rgba(255,68,68,0.4); letter-spacing: 4px; }
+    .guardian-subtitle { text-align: center; font-size: 0.7em; color: #888; letter-spacing: 3px; margin-bottom: 30px; }
+    .boss-block { margin-bottom: 35px; }
+    .boss-block h2 {
+        color: #ff6600; font-size: 1em; letter-spacing: 3px; margin-bottom: 8px;
+        text-shadow: 0 0 8px rgba(255,102,0,0.3);
+        display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    }
+    .boss-link { color: #ff6600; text-decoration: none; }
+    .boss-link:hover { text-decoration: underline; color: #ffea00; }
+    .boss-sector-tag { font-size: 0.7em; color: #ff00ff; letter-spacing: 2px; }
+    .boss-pct { font-size: 0.8em; margin-left: auto; letter-spacing: 1px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8em; margin-bottom: 10px; }
+    th { padding: 8px; text-align: left; border-bottom: 2px solid #00f2ff; }
+    td { padding: 8px; border-bottom: 1px solid #1a1d26; }
+    tr:hover td { background: rgba(0, 242, 255, 0.05); }
+    td[title]:not([title=""]) { cursor: help; border-bottom: 1px dotted #555; }
+    .quest-chk { width: 16px; height: 16px; accent-color: #ff6600; cursor: pointer; }
+    .quest-batch-bar {
+        display: flex; align-items: center; justify-content: center; gap: 15px;
+        margin-top: 15px; padding: 10px; border: 1px solid #ff6600;
+        background: rgba(255, 102, 0, 0.08);
+    }
+    .quest-batch-count { color: #ffea00; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
+    .quest-batch-btn {
+        background: #ff6600; color: #0a0b10; border: none; padding: 8px 18px;
+        font-family: 'Courier New', monospace; font-weight: bold; font-size: 0.85em;
+        cursor: pointer; letter-spacing: 1px; transition: all 0.2s;
+    }
+    .quest-batch-btn:hover { background: #ffea00; box-shadow: 0 0 10px rgba(255, 234, 0, 0.5); }
+    @media (max-width: 700px) {
+        table { font-size: 0.7em; }
+        td, th { padding: 5px; }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <a class="back-link" href="/">&lt; BACK TO HUD</a>
+        <h1>&#x1F6E1; Ring of Guardians</h1>
+        <div class="guardian-subtitle">SURVIVAL MODE BOSSES &mdash; ENSLAVE ALL GUARDIANS TO UNLOCK SURVIVAL</div>
+        ${bossBlocks}
+        <div class="quest-batch-bar" style="display:none;">
+            <span class="quest-batch-count">0 SELECTED</span>
+            <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
+        </div>
+        <div style="text-align:center;margin-top:15px;font-size:0.75em;color:#ff6600;">SELECT ENGAGED MINIONS TO ADD TO YOUR QUEST BOARD</div>
+    </div>
+    <script>
+    (function() {
+        var bar = document.querySelector('.quest-batch-bar');
+        var countEl = bar.querySelector('.quest-batch-count');
+        var btn = bar.querySelector('.quest-batch-btn');
+        var checkboxes = document.querySelectorAll('.quest-chk');
+        function updateBar() {
+            var checked = document.querySelectorAll('.quest-chk:checked');
+            if (checked.length > 0) {
+                bar.style.display = 'flex';
+                countEl.textContent = checked.length + ' SELECTED';
+            } else {
+                bar.style.display = 'none';
+            }
+        }
+        checkboxes.forEach(function(chk) { chk.addEventListener('change', updateBar); });
+        btn.addEventListener('click', function() {
+            var checked = document.querySelectorAll('.quest-chk:checked');
+            if (checked.length === 0) return;
+            var items = [];
+            checked.forEach(function(chk) {
+                items.push({ boss: chk.dataset.boss, minion: chk.dataset.minion, sector: chk.dataset.sector });
+            });
+            var form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '/quest/start-batch';
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'items';
+            input.value = JSON.stringify(items);
+            var redir = document.createElement('input');
+            redir.type = 'hidden';
+            redir.name = 'redirect';
+            redir.value = '/guardians';
+            form.appendChild(input);
+            form.appendChild(redir);
+            document.body.appendChild(form);
+            form.submit();
+        });
+    })();
+    </script>
+</body>
+</html>`;
+}
+
+app.get("/guardians", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const batchRes = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId: SPREADSHEET_ID,
+      ranges: ["Sectors", "Command_Center"],
+    });
+    const [sectorsRaw, ccRaw] = batchRes.data.valueRanges;
+    const allMinions = parseTable(sectorsRaw.values || []);
+    const commandCenter = parseTable(ccRaw.values);
+
+    // Find survival column dynamically
+    let survivalCol = null;
+    if (allMinions.length > 0) {
+      survivalCol = Object.keys(allMinions[0]).find((k) => k.toLowerCase().includes("survival"));
+    }
+
+    // Collect survival boss keys
+    const survivalBossKeys = new Set();
+    for (const row of allMinions) {
+      if (survivalCol && (row[survivalCol] || "").toUpperCase() === "X") {
+        survivalBossKeys.add(`${row["Sector"]}|${row["Boss"]}`);
+      }
+    }
+
+    // Filter minions that belong to survival bosses
+    const survivalMinions = allMinions.filter((r) =>
+      survivalBossKeys.has(`${r["Sector"]}|${r["Boss"]}`)
+    );
+
+    const totals = {
+      intel: getStat(commandCenter, "Intel").totalPossible,
+      stamina: getStat(commandCenter, "Stamina").totalPossible,
+      tempo: getStat(commandCenter, "Tempo").totalPossible,
+      rep: getStat(commandCenter, "Reputation").totalPossible,
+    };
+
+    // Group by boss
+    const bossOrder = [];
+    const bossGroups = {};
+    for (const m of survivalMinions) {
+      const key = `${m["Sector"]}|${m["Boss"]}`;
+      if (!bossGroups[key]) {
+        bossGroups[key] = { bossName: m["Boss"], sector: m["Sector"], minions: [] };
+        bossOrder.push(key);
+      }
+      bossGroups[key].minions.push(m);
+    }
+
+    // Sort by completion: highest first
+    bossOrder.sort((a, b) => {
+      const aG = bossGroups[a], bG = bossGroups[b];
+      const aPct = aG.minions.filter((m) => m["Status"] === "Enslaved").length / (aG.minions.length || 1);
+      const bPct = bG.minions.filter((m) => m["Status"] === "Enslaved").length / (bG.minions.length || 1);
+      if (bPct !== aPct) return bPct - aPct;
+      return aG.bossName.localeCompare(bG.bossName);
+    });
+
+    const bosses = bossOrder.map((k) => bossGroups[k]);
+
+    // Fetch active quests
+    let activeQuestKeys = new Set();
+    try {
+      const quests = await fetchQuestsData(sheets);
+      for (const q of quests.filter((q) => q["Status"] === "Active")) {
+        activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
+      }
+    } catch {}
+
+    res.send(buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys));
+  } catch (err) {
+    console.error("Guardians page error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
   }
 });
@@ -2217,6 +2528,15 @@ function buildQuestBoardPage(questRows, activeCount, totalCount) {
         ${questRows || '<div class="no-quests">NO QUESTS YET. START ONE FROM POWER RANKINGS.</div>'}
     </div>
     <script>
+    function confirmAbandon(form) {
+        if (!confirm('Are you sure you want to abandon this quest?')) return false;
+        var parentOk = prompt('Type your parent\\'s name to confirm they gave permission to delete:');
+        if (!parentOk || parentOk.trim().length === 0) {
+            alert('Quest deletion requires parent permission.');
+            return false;
+        }
+        return true;
+    }
     (function() {
         document.querySelectorAll('.proof-input').forEach(function(input) {
             const btn = input.closest('form').querySelector('.quest-submit-btn');
@@ -2507,7 +2827,7 @@ app.get("/quests", async (req, res) => {
       const sc = statusColors[q["Status"]] || "#555";
       const isActive = q["Status"] === "Active";
       const abandonBtn = isActive
-        ? `<form method="POST" action="/quest/remove" style="margin:0;" onsubmit="return confirm('Abandon this quest?')">
+        ? `<form method="POST" action="/quest/remove" style="margin:0;" onsubmit="return confirmAbandon(this)">
              <input type="hidden" name="questId" value="${q["Quest ID"]}">
              <button type="submit" class="quest-abandon-btn" title="Abandon quest">X</button>
            </form>`

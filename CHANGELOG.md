@@ -1,5 +1,15 @@
 # Changelog
 
+## [2.3.0] - 2025-02-18
+
+### Added
+- **Guardians overview page** (`/guardians`) — Clicking the "Ring of Guardians" title opens a full page showing all survival-mode bosses with their minion tables, completion percentages, and quest board checkboxes
+- **Survival badge on boss/sector pages** — Survival-mode bosses now display a red shield icon and "GUARDIAN" tag on sector detail pages; boss detail pages show a "SURVIVAL MODE GUARDIAN" banner
+- **Parent permission for quest deletion** — Abandoning a quest now requires two confirmations: a standard "Are you sure?" prompt plus a parent name entry to discourage unauthorized deletions
+
+### Changed
+- **Ring of Guardians title** — Now a clickable link (yellow hover glow) that navigates to the guardians overview page
+
 ## [2.2.0] - 2025-02-18
 
 ### Added
