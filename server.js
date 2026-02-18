@@ -3269,24 +3269,7 @@ app.get("/progress", async (req, res) => {
     // Determine time range and bucket size
     let statBarsHtml = "";
     if (statEvents.length === 0) {
-      // Fallback: show current values as simple bars
-      const statData = [
-        { name: "INTEL", value: intel.value, level: intel.level, color: "#00f2ff", max: intel.totalPossible },
-        { name: "STAMINA", value: stamina.value, level: stamina.level, color: "#00ff9d", max: stamina.totalPossible },
-        { name: "TEMPO", value: tempo.value, level: tempo.level, color: "#ff00ff", max: tempo.totalPossible },
-        { name: "REPUTATION", value: reputation.value, level: reputation.level, color: "#ff8800", max: reputation.totalPossible },
-        { name: "CONFIDENCE", value: confidence.value, level: confidence.level, color: "#ffea00", max: confidence.totalPossible },
-      ];
-      statBarsHtml = '<div style="text-align:center;color:#555;font-size:0.7em;margin-bottom:10px;">NO DATE DATA YET — SHOWING CURRENT LEVELS</div>';
-      for (const s of statData) {
-        const pct = s.max > 0 ? Math.min(100, (s.value / s.max) * 100) : 0;
-        statBarsHtml += `
-          <div class="prog-stat">
-            <div class="prog-stat-label" style="color:${s.color};">${s.name}: ${s.level}</div>
-            <div class="prog-stat-bar"><div class="prog-stat-fill" style="width:${pct.toFixed(1)}%;background:${s.color};"></div></div>
-            <div class="prog-stat-pct" style="color:${s.color};">${pct.toFixed(0)}%</div>
-          </div>`;
-      }
+      statBarsHtml = '<div style="text-align:center;color:#555;font-size:0.75em;padding:20px;">NO PROGRESS DATA YET — COMPLETE QUESTS TO SEE GROWTH OVER TIME</div>';
     } else {
       // Find date range
       const allDates = statEvents.map((e) => e.date).sort();
@@ -3318,7 +3301,7 @@ app.get("/progress", async (req, res) => {
         return b; // YYYY-MM
       };
 
-      // Accumulate points per bucket per stat
+      // Accumulate points EARNED per bucket per stat (not cumulative)
       const bucketTotals = {}; // { bucket: { INTELLIGENCE: pts, ... } }
       for (const e of statEvents) {
         const b = toBucket(e.date);
@@ -3327,25 +3310,24 @@ app.get("/progress", async (req, res) => {
       }
 
       const buckets = Object.keys(bucketTotals).sort();
+      const periodData = buckets.map((b) => ({ bucket: b, ...bucketTotals[b] }));
 
-      // Build cumulative totals
-      const cumulative = [];
-      const running = { INTELLIGENCE: 0, STAMINA: 0, TEMPO: 0, REPUTATION: 0 };
-      for (const b of buckets) {
-        for (const stat of statNames) running[stat] += bucketTotals[b][stat];
-        cumulative.push({ bucket: b, ...running });
-      }
-
-      // Find max value for scaling
+      // Find max value across any single period for scaling
       let maxVal = 0;
-      for (const c of cumulative) {
+      for (const p of periodData) {
         for (const stat of statNames) {
-          if (c[stat] > maxVal) maxVal = c[stat];
+          if (p[stat] > maxVal) maxVal = p[stat];
         }
       }
       maxVal = maxVal || 1;
 
-      // Build SVG bar chart
+      // Total points earned across all periods (for summary)
+      const totalEarned = { INTELLIGENCE: 0, STAMINA: 0, TEMPO: 0, REPUTATION: 0 };
+      for (const p of periodData) {
+        for (const stat of statNames) totalEarned[stat] += p[stat];
+      }
+
+      // Build SVG bar chart — points earned per period
       const chartW = 700;
       const chartH = 220;
       const padL = 50;
@@ -3354,7 +3336,7 @@ app.get("/progress", async (req, res) => {
       const padR = 10;
       const plotW = chartW - padL - padR;
       const plotH = chartH - padB - padT;
-      const barGroupW = cumulative.length > 0 ? plotW / cumulative.length : plotW;
+      const barGroupW = periodData.length > 0 ? plotW / periodData.length : plotW;
       const barW = Math.max(3, Math.min(16, (barGroupW - 4) / statNames.length));
 
       let svg = `<svg width="100%" viewBox="0 0 ${chartW} ${chartH}" xmlns="http://www.w3.org/2000/svg" style="max-width:${chartW}px;">`;
@@ -3366,21 +3348,21 @@ app.get("/progress", async (req, res) => {
         svg += `<text x="${padL - 5}" y="${y + 3}" fill="#555" font-size="9" text-anchor="end" font-family="monospace">${val}</text>`;
       }
 
-      // Bars
-      for (let ci = 0; ci < cumulative.length; ci++) {
-        const c = cumulative[ci];
+      // Bars — points earned per period (not cumulative)
+      for (let ci = 0; ci < periodData.length; ci++) {
+        const p = periodData[ci];
         const groupX = padL + ci * barGroupW + 2;
         for (let si = 0; si < statNames.length; si++) {
           const stat = statNames[si];
-          const h = (c[stat] / maxVal) * plotH;
+          const h = (p[stat] / maxVal) * plotH;
           const x = groupX + si * (barW + 1);
           const y = padT + plotH - h;
           svg += `<rect x="${x}" y="${y}" width="${barW}" height="${h}" fill="${statColors[stat]}" opacity="0.85" rx="1">`;
-          svg += `<title>${statLabels[stat]}: ${c[stat].toFixed(1)}</title></rect>`;
+          svg += `<title>${statLabels[stat]}: +${p[stat].toFixed(1)} pts</title></rect>`;
         }
         // Bucket label
         const labelX = groupX + (statNames.length * (barW + 1)) / 2;
-        svg += `<text x="${labelX}" y="${chartH - 5}" fill="#555" font-size="8" text-anchor="middle" font-family="monospace">${formatBucket(c.bucket)}</text>`;
+        svg += `<text x="${labelX}" y="${chartH - 5}" fill="#555" font-size="8" text-anchor="middle" font-family="monospace">${formatBucket(p.bucket)}</text>`;
       }
 
       // Legend
@@ -3393,19 +3375,15 @@ app.get("/progress", async (req, res) => {
 
       svg += `</svg>`;
 
-      // Current levels summary line
-      const levelSummary = [
-        `<span style="color:#00f2ff">INT: ${intel.level}</span>`,
-        `<span style="color:#00ff9d">STA: ${stamina.level}</span>`,
-        `<span style="color:#ff00ff">TMP: ${tempo.level}</span>`,
-        `<span style="color:#ff8800">REP: ${reputation.level}</span>`,
-        `<span style="color:#ffea00">CONF: ${confidence.level}</span>`,
-      ].join(' <span style="color:#333;">|</span> ');
+      // Summary: total points earned
+      const earnedSummary = statNames.map((s) =>
+        `<span style="color:${statColors[s]}">+${totalEarned[s].toFixed(1)} ${statLabels[s]}</span>`
+      ).join(' <span style="color:#333;">|</span> ');
 
       statBarsHtml = `
-        <div style="text-align:center;color:#888;font-size:0.65em;letter-spacing:2px;margin-bottom:8px;">CUMULATIVE GROWTH &mdash; ${bucketLabel} VIEW (${cumulative.length} ${bucketMode === "day" ? "DAYS" : bucketMode === "week" ? "WEEKS" : "MONTHS"})</div>
+        <div style="text-align:center;color:#888;font-size:0.65em;letter-spacing:2px;margin-bottom:8px;">POINTS EARNED PER ${bucketMode.toUpperCase()} (${periodData.length} ${bucketMode === "day" ? "DAYS" : bucketMode === "week" ? "WEEKS" : "MONTHS"})</div>
         <div style="overflow-x:auto;">${svg}</div>
-        <div style="text-align:center;font-size:0.75em;letter-spacing:1px;margin-top:10px;">CURRENT: ${levelSummary}</div>`;
+        <div style="text-align:center;font-size:0.7em;letter-spacing:1px;margin-top:10px;color:#888;">TOTAL EARNED: ${earnedSummary}</div>`;
     }
 
     // Sector donut chart data (pure CSS)
@@ -3743,7 +3721,7 @@ app.get("/progress", async (req, res) => {
         </div>
 
         <div class="progress-section">
-            <h2>&#x2694; STATUS LEVELS</h2>
+            <h2>&#x2694; STAT GROWTH</h2>
             ${statBarsHtml}
         </div>
 
