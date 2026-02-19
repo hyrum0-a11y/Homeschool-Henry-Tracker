@@ -31,5 +31,8 @@ imports/
 # Windows artifacts
 nul
 
+# Test files
+hud_test.html
+
 # Claude Code
 .claude/
