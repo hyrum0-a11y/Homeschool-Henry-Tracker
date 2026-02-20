@@ -1138,6 +1138,11 @@ function processAllData(html, data, activeQuestKeys) {
     survivalRingHtml = `
       <div class="survival-ring${allGuardiansComplete ? ' survival-achieved' : ''}">
         <a class="survival-ring-title" href="/guardians">${shieldIcon} RING OF GUARDIANS</a>
+        <div class="boss-key">
+            <span class="key-item"><span class="key-swatch" style="background:#00ff9d;"></span> Enslaved</span>
+            <span class="key-item"><span class="key-swatch" style="background:#ff6600;"></span> Engaged</span>
+            <span class="key-item"><span class="key-swatch" style="background:#2a2d36; border: 1px solid #555;"></span> Locked</span>
+        </div>
         <div class="guardian-ring">${orbsHtml}</div>
         <div class="survival-summary">${overallPct}% GUARDIAN PROTOCOL COMPLETE</div>
       </div>`;
@@ -1294,28 +1299,39 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     }
     h1 {
         text-shadow: 2px 2px #ff00ff;
-        border-bottom: 1px solid #00f2ff;
         letter-spacing: 2px;
         text-align: center;
         margin-bottom: 15px;
     }
-    h1.hud-title {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 14px;
-        padding: 15px 0;
-        margin-bottom: 20px;
-        position: relative;
+    /* Title block */
+    .hud-title-block {
+        text-align: center;
+        padding: 15px 0 20px 0;
+        margin-bottom: 10px;
     }
-    h1.hud-title span {
+    .title-tagline {
+        font-family: 'Courier New', monospace;
+        font-size: 2em;
+        letter-spacing: 6.6px;
+        color: rgba(0, 242, 255, 0.6);
+        text-transform: uppercase;
+        margin-bottom: 4px;
+        text-shadow: 0 0 8px rgba(0, 242, 255, 0.2);
+    }
+    .title-main {
+        border-bottom: none;
+        margin-bottom: 0;
+        padding: 0;
+        text-shadow: none;
+    }
+    .title-main span {
         background: linear-gradient(90deg, #00f2ff, #ff00ff, #ffea00, #00ff9d, #00f2ff);
         background-size: 300% 100%;
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
         background-clip: text;
         animation: titleShimmer 6s linear infinite;
-        font-size: 1.4em;
+        font-size: 1.6em;
         letter-spacing: 5px;
         filter: drop-shadow(0 0 12px rgba(0, 242, 255, 0.4)) drop-shadow(0 0 25px rgba(255, 0, 255, 0.2));
     }
@@ -1323,16 +1339,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         0% { background-position: 0% 50%; }
         100% { background-position: 300% 50%; }
     }
-    h1.hud-title::before,
-    h1.hud-title::after {
-        content: "";
-        flex: 1;
-        height: 1px;
-        max-width: 80px;
-        background: linear-gradient(90deg, transparent, #00f2ff, transparent);
-    }
-
-    .mc-sprite { filter: drop-shadow(0 0 6px #00f2ff) drop-shadow(0 0 12px rgba(255,0,255,0.3)); flex-shrink: 0; }
 
     /* Confidence row: bar + radar side by side */
     .confidence-row {
@@ -1340,7 +1346,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         align-items: center;
         gap: 25px;
         margin-bottom: 25px;
-        border-bottom: 1px dashed #ffea00;
         padding-bottom: 15px;
     }
     .confidence-bar-section { flex: 3; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
@@ -1364,7 +1369,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
     .levels-right {
         flex: 1;
-        border-left: 1px solid rgba(0, 242, 255, 0.2);
         padding-left: 20px;
         display: flex;
         flex-direction: column;
@@ -1522,7 +1526,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     /* Sector map */
     .sector-map {
         margin-top: 10px;
-        border-top: 1px dashed #00f2ff;
         padding: 15px 10px 40px 10px;
         text-align: center;
     }
@@ -1534,24 +1537,21 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         text-shadow: 0 0 10px rgba(0, 242, 255, 0.5);
     }
     #bosses {
-        display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 40px;
+        columns: 2;
+        column-gap: 20px;
     }
     .sector-zone {
         border: 1px solid rgba(0, 242, 255, 0.3);
         background: rgba(0, 242, 255, 0.03);
         border-radius: 8px;
-        padding: 25px 15px 15px 15px;
+        padding: 20px 12px 12px 12px;
         position: relative;
-        min-width: 220px;
         display: flex;
         flex-direction: column;
         align-items: center;
-        gap: 12px;
-        flex: 1 1 auto;
-        max-width: 420px;
+        gap: 8px;
+        break-inside: avoid;
+        margin-bottom: 20px;
     }
     .sector-zone::before {
         content: attr(data-sector);
@@ -1601,7 +1601,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         display: flex;
         flex-wrap: wrap;
         justify-content: center;
-        gap: 20px;
+        gap: 10px 14px;
+        width: 100%;
     }
     .boss-link {
         text-decoration: none;
@@ -1609,9 +1610,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     }
     .boss-orb-container {
         display: flex;
-        flex-direction: column;
         align-items: center;
-        width: 100px;
+        gap: 6px;
         position: relative;
         cursor: pointer;
     }
@@ -1626,13 +1626,12 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         box-shadow: 0 0 15px #00f2ff;
     }
     .boss-label {
-        font-size: 0.7em;
+        font-size: 0.65em;
         color: #00f2ff;
-        margin-top: 8px;
-        text-align: center;
+        text-align: left;
         word-wrap: break-word;
         line-height: 1.2;
-        width: 100%;
+        max-width: 80px;
     }
     .boss-key {
         display: flex;
@@ -1647,7 +1646,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     /* Power Rankings */
     .power-rankings {
         margin-top: 10px;
-        border-top: 1px dashed #ffd700;
         padding: 15px 10px 20px 10px;
     }
     .power-rankings h1 {
@@ -1968,13 +1966,13 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         .hud-container { padding: 15px; }
         .confidence-row { flex-direction: column; }
         .levels-right {
-            border-left: none;
-            border-top: 1px solid rgba(0, 242, 255, 0.2);
             padding-left: 0;
             padding-top: 15px;
         }
+        .title-main span { font-size: 1.2em; letter-spacing: 3px; }
+        .title-tagline { font-size: 0.75em; letter-spacing: 3px; }
         .stat-grid { grid-template-columns: 1fr; }
-        .sector-zone { min-width: unset; max-width: 100%; }
+        #bosses { columns: 1; }
         .guardian-ring { gap: 15px; }
         .guardian-orb { width: 65px; }
         .guardian-orb-circle { width: 40px; height: 40px; }
@@ -1998,7 +1996,10 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 </head>
 <body>
     <div class="hud-container">
-        <h1 class="hud-title"><svg class="mc-sprite" width="36" height="36" viewBox="0 0 8 8" shape-rendering="crispEdges"><rect x="0" y="0" width="8" height="8" fill="#5b3a1a"/><rect x="1" y="0" width="6" height="1" fill="#3b2210"/><rect x="0" y="1" width="1" height="2" fill="#3b2210"/><rect x="7" y="1" width="1" height="2" fill="#3b2210"/><rect x="1" y="1" width="6" height="2" fill="#c69c6d"/><rect x="0" y="3" width="8" height="1" fill="#c69c6d"/><rect x="0" y="4" width="1" height="1" fill="#c69c6d"/><rect x="7" y="4" width="1" height="1" fill="#c69c6d"/><rect x="1" y="4" width="2" height="1" fill="#fff"/><rect x="5" y="4" width="2" height="1" fill="#fff"/><rect x="2" y="4" width="1" height="1" fill="#1a0a2e"/><rect x="5" y="4" width="1" height="1" fill="#1a0a2e"/><rect x="3" y="4" width="2" height="1" fill="#c69c6d"/><rect x="0" y="5" width="8" height="1" fill="#c69c6d"/><rect x="3" y="5" width="2" height="1" fill="#a0724a"/><rect x="0" y="6" width="1" height="1" fill="#c69c6d"/><rect x="7" y="6" width="1" height="1" fill="#c69c6d"/><rect x="1" y="6" width="6" height="1" fill="#b5825a"/><rect x="2" y="6" width="4" height="1" fill="#c69c6d"/><rect x="0" y="7" width="8" height="1" fill="#c69c6d"/></svg><span>Henry's Sovereign HUD</span><svg class="mc-sprite" width="36" height="36" viewBox="0 0 8 8" shape-rendering="crispEdges"><rect x="0" y="0" width="8" height="8" fill="#0a0"/><rect x="1" y="1" width="2" height="2" fill="#000"/><rect x="5" y="1" width="2" height="2" fill="#000"/><rect x="3" y="3" width="2" height="2" fill="#000"/><rect x="2" y="4" width="1" height="1" fill="#000"/><rect x="5" y="4" width="1" height="1" fill="#000"/><rect x="2" y="5" width="4" height="1" fill="#000"/><rect x="0" y="0" width="8" height="1" fill="#060"/><rect x="0" y="0" width="1" height="8" fill="#060"/><rect x="7" y="0" width="1" height="8" fill="#060"/><rect x="0" y="7" width="8" height="1" fill="#060"/><rect x="1" y="1" width="2" height="2" fill="#111"/><rect x="5" y="1" width="2" height="2" fill="#111"/><rect x="3" y="3" width="2" height="2" fill="#111"/><rect x="2" y="4" width="1" height="1" fill="#111"/><rect x="5" y="4" width="1" height="1" fill="#111"/><rect x="2" y="5" width="4" height="1" fill="#111"/></svg></h1>
+        <div class="hud-title-block">
+            <div class="title-tagline">Path to Independence</div>
+            <h1 class="title-main"><span>The Henry HUD</span></h1>
+        </div>
 
         <div class="confidence-row">
             <div class="radar-main">[[MAIN_RADAR]]</div>
@@ -4339,7 +4340,6 @@ app.get("/army", async (req, res) => {
     }
     h1 {
         text-shadow: 2px 2px #ff00ff;
-        border-bottom: 1px solid #00ff9d;
         letter-spacing: 2px;
         text-align: center;
         margin-bottom: 5px;
@@ -4402,6 +4402,17 @@ app.get("/army", async (req, res) => {
         padding: 40px;
         font-size: 0.9em;
     }
+    .army-emblem {
+        text-align: center;
+        margin: 8px 0 12px 0;
+        padding-bottom: 15px;
+        border-bottom: 1px solid #00ff9d;
+        animation: emblemPulse 4s ease-in-out infinite;
+    }
+    @keyframes emblemPulse {
+        0%, 100% { filter: drop-shadow(0 0 6px rgba(0,242,255,0.3)); }
+        50% { filter: drop-shadow(0 0 14px rgba(0,242,255,0.6)) drop-shadow(0 0 20px rgba(255,0,255,0.2)); }
+    }
     @media (max-width: 600px) {
         body { padding: 10px; }
         .hud-container { padding: 15px; }
@@ -4412,6 +4423,32 @@ app.get("/army", async (req, res) => {
     <div class="hud-container">
         <a class="back-link" href="/">&lt; BACK TO HUD</a>
         <h1>Henry's Army</h1>
+        <div class="army-emblem">
+            <svg width="60" height="60" viewBox="0 0 60 60" xmlns="http://www.w3.org/2000/svg">
+                <defs>
+                    <linearGradient id="emblemGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+                        <stop offset="0%" stop-color="#00f2ff" stop-opacity="0.8"/>
+                        <stop offset="50%" stop-color="#ff00ff" stop-opacity="0.6"/>
+                        <stop offset="100%" stop-color="#ffea00" stop-opacity="0.8"/>
+                    </linearGradient>
+                    <filter id="emblemGlow">
+                        <feGaussianBlur stdDeviation="2" result="blur"/>
+                        <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+                    </filter>
+                </defs>
+                <polygon points="30,2 54,16 54,44 30,58 6,44 6,16" fill="none" stroke="url(#emblemGrad)" stroke-width="1.5" filter="url(#emblemGlow)"/>
+                <polygon points="30,10 46,20 46,40 30,50 14,40 14,20" fill="rgba(0,242,255,0.05)" stroke="rgba(0,242,255,0.3)" stroke-width="1"/>
+                <line x1="30" y1="2" x2="30" y2="10" stroke="rgba(0,242,255,0.4)" stroke-width="1"/>
+                <line x1="54" y1="16" x2="46" y2="20" stroke="rgba(255,0,255,0.4)" stroke-width="1"/>
+                <line x1="54" y1="44" x2="46" y2="40" stroke="rgba(255,0,255,0.4)" stroke-width="1"/>
+                <line x1="30" y1="58" x2="30" y2="50" stroke="rgba(255,234,0,0.4)" stroke-width="1"/>
+                <line x1="6" y1="44" x2="14" y2="40" stroke="rgba(0,242,255,0.4)" stroke-width="1"/>
+                <line x1="6" y1="16" x2="14" y2="20" stroke="rgba(0,242,255,0.4)" stroke-width="1"/>
+                <circle cx="30" cy="30" r="3" fill="#00f2ff" opacity="0.6"/>
+                <circle cx="30" cy="30" r="1.5" fill="#fff"/>
+                <path d="M30 38 L30 22 M25 27 L30 22 L35 27" stroke="#ffea00" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round" filter="url(#emblemGlow)"/>
+            </svg>
+        </div>
         <div class="army-subtitle">${enslaved.length} MINIONS ENSLAVED</div>
         ${sectionsHtml || '<div class="empty-army">NO MINIONS ENSLAVED YET. CONQUER THEM THROUGH THE QUEST BOARD.</div>'}
     </div>
