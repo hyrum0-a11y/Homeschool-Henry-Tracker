@@ -575,7 +575,7 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
   const minionCol = headers.indexOf("Minion");
   const dateAddedCol = headers.indexOf("Date Quest Added");
   const dateCompletedCol = headers.indexOf("Date Quest Completed");
-  const questDueDateCol = headers.indexOf("Quest Due Date");
+  let questDueDateCol = headers.findIndex(h => h.toLowerCase() === "quest due date");
 
   if (questStatusCol < 0 || sectorCol < 0 || bossCol < 0 || minionCol < 0) return;
 
@@ -2638,11 +2638,15 @@ function buildSectorsRow(headers, data) {
     "Quest Status": "",
     "Date Quest Added": "",
     "Date Quest Completed": "",
+    "Quest Due Date": "",
   };
   for (const stat of statNames) {
     valueMap[stat] = statFormula(stat);
   }
-  return headers.map((h) => valueMap[h] ?? "");
+  // Case-insensitive header matching (handles e.g. "Quest Due date" vs "Quest Due Date")
+  const lowerMap = {};
+  for (const k of Object.keys(valueMap)) lowerMap[k.toLowerCase()] = valueMap[k];
+  return headers.map((h) => lowerMap[h.toLowerCase()] ?? valueMap[h] ?? "");
 }
 
 // ---------------------------------------------------------------------------
