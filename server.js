@@ -196,7 +196,7 @@ async function sendVerifyEmail(email, code, name) {
 // Ensure the Quests sheet tab exists (auto-create with headers if missing)
 // ---------------------------------------------------------------------------
 async function ensureQuestsSheet(sheets) {
-  const expectedHeaders = ["Quest ID", "Boss", "Minion", "Sector", "Status", "Proof Type", "Proof Link", "Suggested By AI", "Date Completed", "Date Added", "Date Resolved", "Feedback"];
+  const expectedHeaders = ["Quest ID", "Boss", "Minion", "Sector", "Status", "Proof Type", "Proof Link", "Suggested By AI", "Date Completed", "Date Added", "Date Resolved", "Feedback", "Due Date", "Subject", "Recurring"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
     fields: "sheets.properties.title",
@@ -347,6 +347,48 @@ async function ensureBadgesSheet(sheets) {
 }
 
 // ---------------------------------------------------------------------------
+// Ensure Quest_Log sheet exists (for recurring quest daily entries)
+// ---------------------------------------------------------------------------
+async function ensureQuestLogSheet(sheets) {
+  const expectedHeaders = ["Quest ID", "Date", "Note", "Author"];
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: "sheets.properties.title",
+  });
+  const titles = meta.data.sheets.map((s) => s.properties.title);
+  if (!titles.includes("Quest_Log")) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: "Quest_Log" } } }],
+      },
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quest_Log!A1:D1",
+      valueInputOption: "RAW",
+      requestBody: { values: [expectedHeaders] },
+    });
+    return;
+  }
+  const headerRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Quest_Log!1:1",
+  });
+  const currentHeaders = (headerRes.data.values && headerRes.data.values[0]) || [];
+  const missing = expectedHeaders.filter((h) => !currentHeaders.includes(h));
+  if (missing.length > 0) {
+    const updated = [...currentHeaders, ...missing];
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Quest_Log!A1:${String.fromCharCode(64 + updated.length)}1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [updated] },
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Fetch Quests sheet data
 // ---------------------------------------------------------------------------
 async function fetchQuestsData(sheets) {
@@ -356,6 +398,98 @@ async function fetchQuestsData(sheets) {
     range: "Quests",
   });
   return parseTable(res.data.values);
+}
+
+// ---------------------------------------------------------------------------
+// Fetch Quest_Log sheet data
+// ---------------------------------------------------------------------------
+async function fetchQuestLogData(sheets) {
+  await ensureQuestLogSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Quest_Log",
+  });
+  return parseTable(res.data.values);
+}
+
+// ---------------------------------------------------------------------------
+// Recurring quest helpers
+// ---------------------------------------------------------------------------
+function findRecurringCol(sectors) {
+  if (sectors.length === 0) return null;
+  return Object.keys(sectors[0]).find((k) => k.toLowerCase().includes("recurring")) || null;
+}
+
+function getRecurringQuests(quests) {
+  return quests.filter((q) => (q["Recurring"] || "").toUpperCase() === "X" && (q["Status"] === "Active" || q["Status"] === "Rejected"));
+}
+
+function getLoggedTodayCount(questLogs, recurringQuests) {
+  const today = new Date().toISOString().slice(0, 10);
+  const loggedIds = new Set();
+  for (const log of questLogs) {
+    if ((log["Date"] || "").slice(0, 10) === today) loggedIds.add(log["Quest ID"]);
+  }
+  let count = 0;
+  for (const q of recurringQuests) {
+    if (loggedIds.has(q["Quest ID"])) count++;
+  }
+  return count;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: find an Abandoned quest row for the same boss/minion/sector
+// Returns the 1-based row number for Sheets API, or null if not found
+// ---------------------------------------------------------------------------
+function findAbandonedQuestRow(questRows, boss, minion, sector) {
+  if (!questRows || questRows.length < 2) return null;
+  const headers = questRows[0];
+  const bossCol = headers.indexOf("Boss");
+  const minionCol = headers.indexOf("Minion");
+  const sectorCol = headers.indexOf("Sector");
+  const statusCol = headers.indexOf("Status");
+  if (bossCol < 0 || minionCol < 0 || sectorCol < 0 || statusCol < 0) return null;
+  for (let i = 1; i < questRows.length; i++) {
+    if (questRows[i][bossCol] === boss && questRows[i][minionCol] === minion &&
+        questRows[i][sectorCol] === sector && questRows[i][statusCol] === "Abandoned") {
+      return i + 1;
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Helper: reactivate an Abandoned quest row — reset it to Active with new details
+// ---------------------------------------------------------------------------
+async function reactivateQuest(sheets, questRows, rowNum, { proofType, taskDetail, dueDate, subject, recurring }) {
+  const headers = questRows[0];
+  const colLetter = (idx) => {
+    if (idx < 26) return String.fromCharCode(65 + idx);
+    return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
+  };
+  const today = new Date().toISOString().slice(0, 10);
+  const updates = [];
+  const set = (colName, value) => {
+    const idx = headers.indexOf(colName);
+    if (idx >= 0) updates.push({ range: `Quests!${colLetter(idx)}${rowNum}`, values: [[value]] });
+  };
+  set("Status", "Active");
+  set("Proof Type", proofType);
+  set("Proof Link", "");
+  set("Suggested By AI", taskDetail);
+  set("Date Completed", "");
+  set("Date Added", today);
+  set("Date Resolved", "");
+  set("Feedback", "");
+  set("Due Date", dueDate || "");
+  set("Subject", subject || "");
+  set("Recurring", recurring || "");
+  if (updates.length > 0) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: "RAW", data: updates },
+    });
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -425,7 +559,7 @@ function generateQuestId() {
 // ---------------------------------------------------------------------------
 // Helper: sync Quest Status (and optionally main Status) to Sectors sheet
 // ---------------------------------------------------------------------------
-async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatus) {
+async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatus, options = {}) {
   const secRes = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: "Sectors",
@@ -441,6 +575,7 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
   const minionCol = headers.indexOf("Minion");
   const dateAddedCol = headers.indexOf("Date Quest Added");
   const dateCompletedCol = headers.indexOf("Date Quest Completed");
+  const questDueDateCol = headers.indexOf("Quest Due Date");
 
   if (questStatusCol < 0 || sectorCol < 0 || bossCol < 0 || minionCol < 0) return;
 
@@ -466,9 +601,12 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
         }
       }
 
-      // Quest added to board — set Date Quest Added
+      // Quest added to board — set Date Quest Added and Due Date
       if (questStatus === "Active" && dateAddedCol >= 0) {
         updates.push({ range: `Sectors!${colLetter(dateAddedCol)}${rowNum}`, values: [[now]] });
+      }
+      if (questStatus === "Active" && questDueDateCol >= 0 && options.dueDate) {
+        updates.push({ range: `Sectors!${colLetter(questDueDateCol)}${rowNum}`, values: [[options.dueDate]] });
       }
 
       // Un-approve: revert to Engaged, clear completion date
@@ -482,13 +620,16 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
         }
       }
 
-      // Quest removed/abandoned — clear both dates
+      // Quest removed/abandoned — clear all quest dates
       if (questStatus === "" || questStatus === "Abandoned") {
         if (dateAddedCol >= 0) {
           updates.push({ range: `Sectors!${colLetter(dateAddedCol)}${rowNum}`, values: [[""]] });
         }
         if (dateCompletedCol >= 0) {
           updates.push({ range: `Sectors!${colLetter(dateCompletedCol)}${rowNum}`, values: [[""]] });
+        }
+        if (questDueDateCol >= 0) {
+          updates.push({ range: `Sectors!${colLetter(questDueDateCol)}${rowNum}`, values: [[""]] });
         }
       }
 
@@ -946,6 +1087,21 @@ function processAllData(html, data, activeQuestKeys) {
   // -- BUILD BOSS MAP --
   const bossMap = buildBossMap(sectors);
 
+  // -- DETECT SURVIVAL BOSSES (needed for sector map guardian markers) --
+  let survivalCol = null;
+  if (sectors.length > 0) {
+    const firstRow = sectors[0];
+    survivalCol = Object.keys(firstRow).find((k) => k.toLowerCase().includes("survival"));
+  }
+  const survivalBossKeys = new Set();
+  if (survivalCol) {
+    for (const row of sectors) {
+      if ((row[survivalCol] || "").toUpperCase() === "X") {
+        survivalBossKeys.add(`${row["Sector"]}|${row["Boss"]}`);
+      }
+    }
+  }
+
   // -- BUILD SECTOR HTML (with radar + clickable bosses) --
   let bossHtml = "";
   for (const sector in bossMap) {
@@ -975,6 +1131,8 @@ function processAllData(html, data, activeQuestKeys) {
       const stats = bossMap[sector][bossName];
       const fraction = `(${stats.enslaved}/${stats.total})`;
       const diameter = 35 + stats.total * 6;
+      const ringWidth = Math.max(5, Math.round(diameter * 0.2));
+      const innerDia = diameter - ringWidth * 2;
       const safeTotal = stats.total || 1;
 
       const pEnslaved = (stats.enslaved / safeTotal) * 100;
@@ -982,19 +1140,27 @@ function processAllData(html, data, activeQuestKeys) {
 
       const gradient = `conic-gradient(
         #00ff9d 0% ${pEnslaved}%,
-        #0a0b10 ${pEnslaved}% ${pEnslaved + 1}%,
-        #ff6600 ${pEnslaved + 1}% ${pEnslaved + 1 + pEngaged}%,
-        #0a0b10 ${pEnslaved + 1 + pEngaged}% ${pEnslaved + 2 + pEngaged}%,
-        #2a2d36 ${pEnslaved + 2 + pEngaged}% 100%
+        #ff6600 ${pEnslaved}% ${pEnslaved + pEngaged}%,
+        #2a2d36 ${pEnslaved + pEngaged}% 100%
       )`;
+      const maskPct = ((innerDia / diameter) * 50).toFixed(1);
+      const ringMask = `-webkit-mask: radial-gradient(circle, transparent ${maskPct}%, #000 ${maskPct}%); mask: radial-gradient(circle, transparent ${maskPct}%, #000 ${maskPct}%);`;
 
       const encodedBoss = encodeURIComponent(bossName);
       const encodedSector = encodeURIComponent(sector);
+      const isGuardian = survivalBossKeys.has(`${sector}|${bossName}`);
+      const guardianClass = isGuardian ? " boss-guardian" : "";
+      // Gold star sized to fill inner ring space
+      const starSize = Math.round(innerDia * 0.65);
+      const guardianIcon = isGuardian ? `<div class="boss-guardian-star"><svg width="${starSize}" height="${starSize}" viewBox="0 0 20 20"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5" filter="url(#starGlow)"/><defs><filter id="starGlow"><feGaussianBlur stdDeviation="1.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs></svg></div>` : "";
 
       sectorBossHtml += `
         <a class="boss-link" href="/boss/${encodedBoss}?sector=${encodedSector}" >
-          <div class="boss-orb-container">
-            <div class="boss-pie" style="width:${diameter}px; height:${diameter}px; background:${gradient};"></div>
+          <div class="boss-orb-container${guardianClass}">
+            <div class="boss-ring-wrap" style="width:${diameter}px; height:${diameter}px;">
+              <div class="boss-pie" style="width:${diameter}px; height:${diameter}px; background:${gradient}; ${ringMask}"></div>
+              ${guardianIcon}
+            </div>
             <div class="boss-label">${bossName} ${fraction}</div>
           </div>
         </a>`;
@@ -1003,24 +1169,17 @@ function processAllData(html, data, activeQuestKeys) {
     bossHtml += `<div class="sector-zone" data-sector="${sector.toUpperCase()}"><a class="sector-link" href="/sector/${encodeURIComponent(sector)}">${sector.toUpperCase()}</a>${sectorRadarHtml}<div class="sector-bosses">${sectorBossHtml}</div></div>`;
   }
 
-  // -- SURVIVAL RING (Ring of Guardians) --
-  // Find the survival column name dynamically (handles "Survival Mode Required", "Survival Mode Requirements", etc.)
-  let survivalCol = null;
-  if (sectors.length > 0) {
-    const firstRow = sectors[0];
-    survivalCol = Object.keys(firstRow).find((k) => k.toLowerCase().includes("survival"));
-  }
-
+  // -- SURVIVAL GATE (replaces Ring of Guardians) --
   let survivalRingHtml = "";
   let survivalModeHeaderHtml = "";
-  const survivalBossKeys = new Set();
   const survivalBosses = [];
   for (const row of sectors) {
     if (survivalCol && (row[survivalCol] || "").toUpperCase() === "X") {
       const key = `${row["Sector"]}|${row["Boss"]}`;
-      if (!survivalBossKeys.has(key)) {
-        survivalBossKeys.add(key);
-        survivalBosses.push({ sector: row["Sector"], bossName: row["Boss"] });
+      if (!survivalBossKeys.has(key) || !survivalBosses.find(sb => sb.sector === row["Sector"] && sb.bossName === row["Boss"])) {
+        if (!survivalBosses.find(sb => sb.sector === row["Sector"] && sb.bossName === row["Boss"])) {
+          survivalBosses.push({ sector: row["Sector"], bossName: row["Boss"] });
+        }
       }
     }
   }
@@ -1032,54 +1191,27 @@ function processAllData(html, data, activeQuestKeys) {
       const bDataB = bossMap[b.sector]?.[b.bossName] || { enslaved: 0, total: 1 };
       const aFrac = aData.total > 0 ? aData.enslaved / aData.total : 0;
       const bFrac = bDataB.total > 0 ? bDataB.enslaved / bDataB.total : 0;
-      if (bFrac !== aFrac) return bFrac - aFrac; // descending by fraction
-      return a.bossName.localeCompare(b.bossName); // ascending by name
+      if (bFrac !== aFrac) return bFrac - aFrac;
+      return a.bossName.localeCompare(b.bossName);
     });
 
-    let orbsHtml = "";
     let totalCompleted = 0;
     let totalMinions = 0;
+    let guardiansDefeated = 0;
 
     for (const sb of survivalBosses) {
       const bData = bossMap[sb.sector]?.[sb.bossName];
       if (!bData) continue;
-
-      const pct = bData.total > 0 ? (bData.enslaved / bData.total) * 100 : 0;
       totalCompleted += bData.enslaved;
       totalMinions += bData.total;
-
-      let stateClass;
-      if (pct >= 100) {
-        stateClass = "complete";
-      } else if (bData.enslaved > 0) {
-        stateClass = "in-progress";
-      } else {
-        stateClass = "not-started";
-      }
-
-      // Conic gradient for fill (red for progress, green when complete)
-      const pEnslaved = (bData.enslaved / (bData.total || 1)) * 100;
-      const gradient = pct >= 100
-        ? "background: #00ff9d;"
-        : `background: conic-gradient(#ff4444 0% ${pEnslaved.toFixed(1)}%, #1a1d26 ${pEnslaved.toFixed(1)}% 100%);`;
-
-      const encodedBoss = encodeURIComponent(sb.bossName);
-      const encodedSector = encodeURIComponent(sb.sector);
-
-      orbsHtml += `
-        <a class="guardian-orb ${stateClass}" href="/boss/${encodedBoss}?sector=${encodedSector}">
-          <div class="guardian-orb-circle" style="${gradient}"></div>
-          <div class="guardian-label">${escHtml(sb.bossName)}</div>
-          <div class="guardian-fraction">${bData.enslaved}/${bData.total}</div>
-        </a>`;
+      if (bData.enslaved >= bData.total) guardiansDefeated++;
     }
 
     const overallPct = totalMinions > 0 ? Math.round((totalCompleted / totalMinions) * 100) : 0;
     const allGuardiansComplete = survivalBosses.length > 0 && overallPct >= 100;
 
-    // Minecraft-style pixel heart SVG — glow proportional to boss completion
+    // Minecraft-style pixel heart SVG
     const heartSvg = (fraction, gold) => {
-      // fraction: 0.0 (empty) to 1.0 (full), gold: true when all guardians complete
       const f = Math.max(0, Math.min(1, fraction));
       let color, shadow, highlight;
       if (gold) {
@@ -1087,7 +1219,6 @@ function processAllData(html, data, activeQuestKeys) {
       } else if (f >= 1) {
         color = "#ff4444"; shadow = "#aa0000"; highlight = "#ff8888";
       } else if (f > 0) {
-        // Blend from dim (#553333) to red (#ff4444) based on fraction
         const r = Math.round(0x55 + (0xff - 0x55) * f);
         const g = Math.round(0x33 * (1 - f));
         const b = Math.round(0x33 * (1 - f));
@@ -1112,7 +1243,7 @@ function processAllData(html, data, activeQuestKeys) {
       </svg>`;
     };
 
-    // Build hearts row — one per guardian boss, glow proportional to enslaved fraction
+    // Build hearts row
     let heartsHtml = "";
     for (const sb of survivalBosses) {
       const bData = bossMap[sb.sector]?.[sb.bossName];
@@ -1132,20 +1263,24 @@ function processAllData(html, data, activeQuestKeys) {
            <div class="mode-subtitle">ENSLAVE ALL GUARDIANS TO ENTER SURVIVAL MODE</div>
          </div>`;
 
-    // Ring of Guardians orbs — stays in its own section
-    const shieldIcon = `<svg width="18" height="20" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:4px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg>`;
+    // Compact survival gate graphic — links to guardians page
+    const gateColor = allGuardiansComplete ? "#ffd700" : "#ffea00";
+    const gateStatus = allGuardiansComplete ? "SURVIVAL UNLOCKED" : `${guardiansDefeated}/${survivalBosses.length} GUARDIANS DEFEATED`;
+    const gatePct = `${overallPct}% MINIONS ENSLAVED`;
 
     survivalRingHtml = `
-      <div class="survival-ring${allGuardiansComplete ? ' survival-achieved' : ''}">
-        <a class="survival-ring-title" href="/guardians">${shieldIcon} RING OF GUARDIANS</a>
-        <div class="boss-key">
-            <span class="key-item"><span class="key-swatch" style="background:#00ff9d;"></span> Enslaved</span>
-            <span class="key-item"><span class="key-swatch" style="background:#ff6600;"></span> Engaged</span>
-            <span class="key-item"><span class="key-swatch" style="background:#2a2d36; border: 1px solid #555;"></span> Locked</span>
+      <a href="/guardians" class="survival-gate${allGuardiansComplete ? ' survival-gate-achieved' : ''}">
+        <div class="survival-gate-icon">
+          <svg width="28" height="28" viewBox="0 0 20 20">
+            <polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5" filter="url(#gateStarGlow)"/>
+            <defs><filter id="gateStarGlow"><feGaussianBlur stdDeviation="1.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
+          </svg>
         </div>
-        <div class="guardian-ring">${orbsHtml}</div>
-        <div class="survival-summary">${overallPct}% GUARDIAN PROTOCOL COMPLETE</div>
-      </div>`;
+        <div class="survival-gate-text">
+          <div class="survival-gate-title" style="color:${gateColor};">${gateStatus}</div>
+          <div class="survival-gate-sub">${gatePct}</div>
+        </div>
+      </a>`;
   }
 
   // -- BOSS CONQUEST RANKINGS (bosses with remaining minions) --
@@ -1615,14 +1750,19 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         position: relative;
         cursor: pointer;
     }
-    .boss-pie {
-        border-radius: 50%;
-        border: 2px solid #00f2ff;
-        box-shadow: 0 0 10px rgba(0, 242, 255, 0.4);
+    .boss-ring-wrap {
+        position: relative;
+        flex-shrink: 0;
         transition: transform 0.2s ease;
     }
-    .boss-pie:hover {
+    .boss-ring-wrap:hover {
         transform: scale(1.2);
+    }
+    .boss-pie {
+        border-radius: 50%;
+        box-shadow: 0 0 10px rgba(0, 242, 255, 0.4);
+    }
+    .boss-ring-wrap:hover .boss-pie {
         box-shadow: 0 0 15px #00f2ff;
     }
     .boss-label {
@@ -1632,6 +1772,20 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         word-wrap: break-word;
         line-height: 1.2;
         max-width: 80px;
+    }
+    .boss-guardian .boss-pie {
+        box-shadow: 0 0 10px rgba(255,234,0,0.3), 0 0 20px rgba(255,234,0,0.1);
+    }
+    .boss-guardian .boss-ring-wrap:hover .boss-pie {
+        box-shadow: 0 0 18px rgba(255,234,0,0.5), 0 0 30px rgba(255,234,0,0.2);
+    }
+    .boss-guardian .boss-label { color: #ffea00; }
+    .boss-guardian-star {
+        position: absolute;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        pointer-events: none;
     }
     .boss-key {
         display: flex;
@@ -1771,10 +1925,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     .nav-army:hover { background: #00ff9d; color: #0a0b10; box-shadow: 0 0 15px rgba(0,255,157,0.5); }
     .nav-progress { color: #ffea00; border-color: #ffea00; box-shadow: 0 0 8px rgba(255,234,0,0.2); }
     .nav-progress:hover { background: #ffea00; color: #0a0b10; box-shadow: 0 0 15px rgba(255,234,0,0.5); }
-    .nav-quests { color: #ff6600; border-color: #ff6600; box-shadow: 0 0 8px rgba(255,102,0,0.2); }
-    .nav-quests:hover { background: #ff6600; color: #0a0b10; box-shadow: 0 0 15px rgba(255,102,0,0.5); }
-    .nav-quests.pulse { animation: pulse 2s infinite; }
-    .nav-quests.dim { border-color: #333; color: #666; box-shadow: none; animation: none; }
     .nav-admin { color: #ff00ff; border-color: #ff00ff; box-shadow: 0 0 8px rgba(255,0,255,0.2); }
     .nav-admin:hover { background: #ff00ff; color: #0a0b10; box-shadow: 0 0 15px rgba(255,0,255,0.5); }
     .nav-user { color: #555; border-color: #333; box-shadow: none; font-size: 0.6em !important; letter-spacing: 1px !important; padding: 5px 10px !important; margin-top: 4px; }
@@ -1799,20 +1949,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
     .glitch { font-size: 0.7em; color: #555; margin-top: 20px; text-align: center; line-height: 1.6; }
 
-    /* Survival Mode — Ring of Guardians */
-    .survival-ring {
-        text-align: center;
-        padding: 20px 10px;
-        margin-bottom: 20px;
-        border: 1px solid rgba(255, 68, 68, 0.3);
-        border-radius: 8px;
-        background: rgba(255, 68, 68, 0.03);
-    }
-    .survival-ring.survival-achieved {
-        border-color: rgba(255, 215, 0, 0.5);
-        background: rgba(255, 215, 0, 0.03);
-        box-shadow: 0 0 20px rgba(255, 215, 0, 0.15);
-    }
+    /* Survival Mode */
     .mode-header {
         padding: 10px 0 0;
         margin-top: 10px;
@@ -1875,90 +2012,48 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     .guardian-heart:hover {
         transform: scale(1.3);
     }
-    .survival-ring-title {
-        font-size: 0.9em;
-        color: #ff4444;
-        letter-spacing: 3px;
-        margin-bottom: 15px;
-        text-shadow: 0 0 8px rgba(255, 68, 68, 0.5);
-        text-decoration: none;
-        display: block;
-        cursor: pointer;
-        transition: color 0.2s, text-shadow 0.2s;
-    }
-    .survival-ring-title:hover {
-        color: #ffea00;
-        text-shadow: 0 0 12px rgba(255, 234, 0, 0.6);
-    }
-    .survival-achieved .survival-ring-title {
-        color: #ffd700;
-        text-shadow: 0 0 8px rgba(255, 215, 0, 0.5);
-    }
-    .survival-achieved .survival-ring-title:hover {
-        color: #ffea00;
-        text-shadow: 0 0 12px rgba(255, 234, 0, 0.8);
-    }
-    .guardian-ring {
+    /* Survival Gate — compact link to guardians page */
+    .survival-gate {
         display: flex;
-        flex-wrap: wrap;
-        justify-content: center;
-        gap: 25px;
-        padding: 10px;
-    }
-    .guardian-orb {
-        display: flex;
-        flex-direction: column;
         align-items: center;
-        width: 80px;
+        justify-content: center;
+        gap: 12px;
+        padding: 10px 20px;
+        margin: 10px auto;
+        max-width: 360px;
+        border: 1px solid rgba(255,234,0,0.25);
+        background: rgba(255,234,0,0.03);
         text-decoration: none;
-        color: inherit;
-        cursor: pointer;
+        transition: all 0.2s;
     }
-    .guardian-orb-circle {
-        width: 50px;
-        height: 50px;
-        border-radius: 50%;
-        transition: transform 0.2s, box-shadow 0.2s;
+    .survival-gate:hover {
+        border-color: rgba(255,234,0,0.5);
+        background: rgba(255,234,0,0.06);
+        box-shadow: 0 0 15px rgba(255,234,0,0.15);
     }
-    .guardian-orb:hover .guardian-orb-circle {
-        transform: scale(1.2);
-        box-shadow: 0 0 20px #ffea00, 0 0 40px rgba(255, 234, 0, 0.4) !important;
-        border-color: #ffea00 !important;
+    .survival-gate-achieved {
+        border-color: rgba(255,215,0,0.4);
+        background: rgba(255,215,0,0.05);
     }
-    .guardian-orb:hover .guardian-label {
-        color: #ffea00;
+    .survival-gate-achieved:hover {
+        border-color: rgba(255,215,0,0.6);
+        background: rgba(255,215,0,0.08);
+        box-shadow: 0 0 15px rgba(255,215,0,0.2);
     }
-    .guardian-orb.complete .guardian-orb-circle {
-        box-shadow: 0 0 15px #00ff9d, 0 0 30px rgba(0, 255, 157, 0.3);
-        border: 2px solid #00ff9d;
-    }
-    .guardian-orb.in-progress .guardian-orb-circle {
-        box-shadow: 0 0 12px #ff6600, 0 0 20px rgba(255, 102, 0, 0.3);
-        border: 2px solid #ff6600;
-    }
-    .guardian-orb.not-started .guardian-orb-circle {
-        box-shadow: 0 0 5px rgba(255, 68, 68, 0.2);
-        border: 2px solid #333;
-    }
-    .guardian-label {
-        font-size: 0.6em;
-        color: #aaa;
-        margin-top: 6px;
-        text-align: center;
-        word-wrap: break-word;
-        line-height: 1.2;
-        width: 100%;
-    }
-    .guardian-fraction {
-        font-size: 0.55em;
-        color: #666;
-        margin-top: 2px;
-    }
-    .survival-summary {
-        font-size: 0.7em;
-        color: #666;
+    .survival-gate-icon { flex-shrink: 0; }
+    .survival-gate-title {
+        font-size: 0.75em;
+        font-weight: bold;
         letter-spacing: 2px;
-        margin-top: 10px;
+        font-family: 'Courier New', monospace;
+        text-transform: uppercase;
+    }
+    .survival-gate-sub {
+        font-size: 0.6em;
+        color: #666;
+        letter-spacing: 1px;
+        font-family: 'Courier New', monospace;
+        text-transform: uppercase;
     }
 
     @media (max-width: 600px) {
@@ -1991,6 +2086,102 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         }
         .side-nav a { font-size: 0.6em; padding: 6px 8px; letter-spacing: 1px; }
         .side-nav a:hover { padding-left: 8px; }
+        .quest-status-nav { margin-bottom: 0; display: flex; gap: 0; }
+        .quest-status-nav-title { display: none; }
+        .nav-section-label { display: none; }
+        .quest-status-nav-title::before, .quest-status-nav-title::after,
+        .nav-section-label::before, .nav-section-label::after { display: none; }
+        .quest-status-row { padding: 6px 8px; font-size: 0.6em; letter-spacing: 1px; }
+        .quest-status-q { border-bottom: 1px solid #ff8800; }
+        .quest-status-row:hover { padding-left: 8px; }
+    }
+    /* Quest status nav block */
+    .quest-status-nav {
+        margin-bottom: 16px;
+        font-family: 'Courier New', monospace;
+        text-transform: uppercase;
+    }
+    .quest-status-nav-title,
+    .nav-section-label {
+        font-size: 0.75em;
+        font-weight: bold;
+        color: #ffea00;
+        letter-spacing: 3px;
+        text-align: center;
+        margin-bottom: 4px;
+        font-family: 'Courier New', monospace;
+        text-transform: uppercase;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+    }
+    .nav-section-label {
+        margin-top: 14px;
+    }
+    .quest-status-nav-title::before, .quest-status-nav-title::after,
+    .nav-section-label::before, .nav-section-label::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+        background: linear-gradient(90deg, transparent, #ffea00, transparent);
+        max-width: 40px;
+    }
+    .quest-status-row {
+        display: block;
+        text-decoration: none;
+        padding: 5px 10px;
+        font-size: 0.7em;
+        font-weight: bold;
+        letter-spacing: 2px;
+        transition: all 0.2s;
+        border: 1px solid;
+        background: #0a0b10;
+    }
+    .quest-status-row:hover { padding-left: 16px; }
+    .quest-status-q { color: #ff8800; border-color: #ff8800; box-shadow: 0 0 6px rgba(255,136,0,0.2); border-bottom: none; }
+    .quest-status-q:hover { background: #ff8800; color: #0a0b10; box-shadow: 0 0 12px rgba(255,136,0,0.4); }
+    .quest-status-r { color: #00f2ff; border-color: #00f2ff; box-shadow: 0 0 6px rgba(0,242,255,0.2); }
+    .quest-status-r:hover { background: #00f2ff; color: #0a0b10; box-shadow: 0 0 12px rgba(0,242,255,0.4); }
+    .quest-status-q-only { color: #ff8800; border-color: #ff8800; box-shadow: 0 0 6px rgba(255,136,0,0.2); }
+    .quest-status-q-only:hover { background: #ff8800; color: #0a0b10; box-shadow: 0 0 12px rgba(255,136,0,0.4); }
+    /* Nav notifications */
+    .nav-notif {
+        display: block;
+        padding: 4px 8px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.6em;
+        letter-spacing: 1px;
+        text-transform: uppercase;
+        text-align: center;
+        text-decoration: none;
+    }
+    .nav-notif:first-child {
+        margin-top: 10px;
+    }
+    .nav-streak {
+        color: #ff8800;
+        text-shadow: 0 0 6px rgba(255,136,0,0.3);
+    }
+    .nav-streak-record {
+        animation: recordPulse 2s ease-in-out infinite;
+    }
+    @keyframes recordPulse {
+        0%, 100% { text-shadow: 0 0 6px rgba(255,136,0,0.3); }
+        50% { text-shadow: 0 0 14px rgba(255,136,0,0.7); }
+    }
+    .nav-record-tag {
+        color: #ffea00;
+        font-weight: bold;
+    }
+    .nav-rejected {
+        color: #ff0044;
+        text-shadow: 0 0 6px rgba(255,0,68,0.3);
+        font-weight: bold;
+    }
+    .nav-rejected:hover {
+        color: #ff4488;
+        text-shadow: 0 0 10px rgba(255,0,68,0.5);
     }
     </style>
 </head>
@@ -2041,10 +2232,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 
         [[RECENT_ENSLAVED]]
 
-        [[STREAK_SECTION]]
-
-        [[REJECTED_ALERTS]]
-
         <div class="sector-map">
             <h1>Bosses & Minions</h1>
             <div class="boss-key">
@@ -2075,10 +2262,12 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         </div>
     </div>
     <nav class="side-nav">
+        [[QUEST_STATUS_NAV]]
+        [[NAV_NOTIFICATIONS]]
+        <div class="nav-section-label">LINKS</div>
         <a href="/army" class="nav-army">[[ARMY_LINK]]</a>
         <a href="/badges" class="nav-badges">[[BADGES_LINK]]</a>
         <a href="/progress" class="nav-progress">&#x1F4CA; PROGRESS</a>
-        <a href="/quests" class="nav-quests">[[QUEST_LINK]]</a>
         [[ADMIN_NAV]]
         <a href="/login" class="nav-user">[[USER_NAV]]</a>
     </nav>
@@ -2092,9 +2281,10 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
   const survivalBadge = isSurvivalBoss
-    ? `<div class="survival-badge"><svg width="14" height="16" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:3px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg> SURVIVAL MODE GUARDIAN</div>`
+    ? `<div class="survival-badge"><svg width="14" height="14" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:3px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg> SURVIVAL MODE GUARDIAN</div>`
     : "";
 
+  const recCol = findRecurringCol(minions);
   let rows = "";
   for (const m of minions) {
     const sc = statusColor[m["Status"]] || "#555";
@@ -2105,20 +2295,22 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
     const nTotal = (parseFloat(nInt) + parseFloat(nSta) + parseFloat(nTmp) + parseFloat(nRep)).toFixed(1);
     const qKey = bossName + "|" + m["Minion"];
     const onQuest = activeQuestKeys && activeQuestKeys.has(qKey);
+    const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
     let questBtn;
     if (onQuest) {
       questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
     } else if (m["Status"] === "Engaged") {
-      questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}" title="Select for quest board">`;
+      questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
     } else {
       questBtn = `<span style="opacity:0.2;">-</span>`;
     }
+    const recurTag = isRec ? `<span style="font-size:0.65em;color:#00f2ff;border:1px solid #00f2ff;padding:1px 4px;margin-left:6px;letter-spacing:1px;vertical-align:middle;">REC</span>` : "";
     const prereqText = m["Status"] === "Locked" && m["Locked for what?"] ? m["Locked for what?"] : "";
     rows += `
       <tr>
         <td>${questBtn}</td>
         <td title="${escHtml(m["Task"] || "")}">
-          ${escHtml(m["Minion"])}
+          ${escHtml(m["Minion"])}${recurTag}
           ${prereqText ? `<div style="font-size:0.75em;color:#ff0044;margin-top:2px;text-transform:none;">Requires: ${escHtml(prereqText)}</div>` : ""}
         </td>
         <td style="color:${sc}; font-weight:bold;">${m["Status"]}</td>
@@ -2169,11 +2361,11 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
     }
     .survival-badge {
         text-align: center;
-        color: #ff4444;
+        color: #ffea00;
         font-size: 0.7em;
         letter-spacing: 3px;
         margin-bottom: 5px;
-        text-shadow: 0 0 8px rgba(255, 68, 68, 0.4);
+        text-shadow: 0 0 8px rgba(255, 234, 0, 0.4);
     }
     .back-link {
         display: inline-block;
@@ -2226,6 +2418,12 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
         background: rgba(255, 102, 0, 0.08);
     }
     .quest-batch-count { color: #ffea00; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
+    .quest-due-label { color: #ff8800; font-size: 0.8em; font-weight: bold; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
+    .quest-batch-due {
+        background: #1a1d26; border: 1px solid #ff8800; color: #ff8800; padding: 5px 8px;
+        font-family: 'Courier New', monospace; font-size: 0.9em; cursor: pointer;
+    }
+    .quest-batch-due:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 136, 0, 0.4); }
     .quest-batch-btn {
         background: #ff6600; color: #0a0b10; border: none; padding: 8px 18px;
         font-family: 'Courier New', monospace; font-weight: bold; font-size: 0.85em;
@@ -2258,6 +2456,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
         </table>
         <div class="quest-batch-bar" style="display:none;">
             <span class="quest-batch-count">0 SELECTED</span>
+            <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
             <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
         </div>
         <div style="text-align:center;margin-top:15px;font-size:0.75em;color:#ff6600;">SELECT ENGAGED MINIONS TO ADD TO YOUR QUEST BOARD</div>
@@ -2267,12 +2466,16 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
         const bar = document.querySelector('.quest-batch-bar');
         const countEl = bar.querySelector('.quest-batch-count');
         const btn = bar.querySelector('.quest-batch-btn');
+        const dueInput = bar.querySelector('.quest-batch-due');
+        const dueLabel = bar.querySelector('.quest-due-label');
         const checkboxes = document.querySelectorAll('.quest-chk');
         function updateBar() {
             const checked = document.querySelectorAll('.quest-chk:checked');
             if (checked.length > 0) {
                 bar.style.display = 'flex';
                 countEl.textContent = checked.length + ' SELECTED';
+                var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
+                if (dueLabel) dueLabel.style.display = hasRec ? 'none' : '';
             } else {
                 bar.style.display = 'none';
             }
@@ -2281,6 +2484,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
         btn.addEventListener('click', function() {
             const checked = document.querySelectorAll('.quest-chk:checked');
             if (checked.length === 0) return;
+            var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
             var items = [];
             checked.forEach(function(chk) {
                 items.push({ boss: chk.dataset.boss, minion: chk.dataset.minion, sector: chk.dataset.sector });
@@ -2296,8 +2500,13 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
             redir.type = 'hidden';
             redir.name = 'redirect';
             redir.value = window.location.pathname + window.location.search;
+            var due = document.createElement('input');
+            due.type = 'hidden';
+            due.name = 'dueDate';
+            due.value = hasRec ? '' : (dueInput.value || '');
             form.appendChild(input);
             form.appendChild(redir);
+            form.appendChild(due);
             document.body.appendChild(form);
             form.submit();
         });
@@ -2425,6 +2634,7 @@ function buildSectorsRow(headers, data) {
     Status: "Enslaved",
     "Impact(1-3)": data.impact,
     "Survival Mode Required": "",
+    "Recurring": data.recurring || "",
     "Quest Status": "",
     "Date Quest Added": "",
     "Date Quest Completed": "",
@@ -2836,11 +3046,13 @@ app.get("/", async (req, res) => {
     let activeQuestKeys = new Set();
     let recentEnslavedHtml = "";
     let quests = [];
+    let questLogs = [];
     try {
-      quests = await fetchQuestsData(sheets);
-      const activeQuests = quests.filter((q) => q["Status"] === "Active");
+      [quests, questLogs] = await Promise.all([fetchQuestsData(sheets), fetchQuestLogData(sheets)]);
+      const activeQuests = quests.filter((q) => q["Status"] === "Active" && (q["Recurring"] || "").toUpperCase() !== "X");
       activeQuestCount = activeQuests.length;
-      for (const q of activeQuests) {
+      const onBoardQuests = quests.filter((q) => q["Status"] === "Active" || q["Status"] === "Submitted");
+      for (const q of onBoardQuests) {
         activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
       }
       // Build recently enslaved list (5 most recent approved quests)
@@ -2878,20 +3090,38 @@ app.get("/", async (req, res) => {
 
     let html = processAllData(HTML_TEMPLATE, data, activeQuestKeys);
     html = html.split("[[RECENT_ENSLAVED]]").join(recentEnslavedHtml);
-    html = html.split("[[STREAK_SECTION]]").join(buildStreakHtml(streakData));
-    html = html.split("[[REJECTED_ALERTS]]").join(buildRejectedAlertsHtml(quests));
+
+    // Quest status nav for side nav
+    const visibleQuests = quests.filter(q => q["Status"] !== "Abandoned" && q["Status"] !== "Approved" && (q["Recurring"] || "").toUpperCase() !== "X");
+    const recurringQuests = getRecurringQuests(quests);
+
+    let questStatusNav = '<div class="quest-status-nav"><div class="quest-status-nav-title">MISSIONS</div>';
+    questStatusNav += `<a href="/quests" class="quest-status-row quest-status-q">QUESTS: ${activeQuestCount}</a>`;
+    questStatusNav += `<a href="/recurring" class="quest-status-row quest-status-r">RECURRING: ${recurringQuests.length}</a>`;
+    questStatusNav += '</div>';
+    html = html.split("[[QUEST_STATUS_NAV]]").join(questStatusNav);
+
+    // Nav notifications — streak + rejected alerts between MISSIONS and LINKS
+    let navNotifications = '';
+    const { currentStreak, bestStreak } = streakData;
+    if (currentStreak > 0) {
+      const isRecord = currentStreak >= bestStreak;
+      navNotifications += `<div class="nav-notif nav-streak${isRecord ? ' nav-streak-record' : ''}">` +
+        `\u{1F525} ${currentStreak} DAY STREAK` +
+        (isRecord ? ' <span class="nav-record-tag">RECORD!</span>' : ` (BEST: ${bestStreak})`) +
+        `</div>`;
+    }
+    const rejected = quests.filter((q) => q["Status"] === "Rejected");
+    if (rejected.length > 0) {
+      navNotifications += `<a href="/quests" class="nav-notif nav-rejected">` +
+        `\u{26A0} ${rejected.length} REJECTED</a>`;
+    }
+    html = html.split("[[NAV_NOTIFICATIONS]]").join(navNotifications);
 
     const questBadgeHtml = activeQuestCount > 0
       ? `<a href="/quests" class="quest-badge-link"><span class="quest-badge">${activeQuestCount} ACTIVE</span></a>`
       : `<a href="/quests" class="quest-badge-link"><span class="quest-badge dim">QUEST BOARD</span></a>`;
     html = html.split("[[QUEST_BADGE]]").join(questBadgeHtml);
-
-    const questLinkText = activeQuestCount > 0
-      ? `&#x2694; ${activeQuestCount} QUEST${activeQuestCount > 1 ? "S" : ""}`
-      : `&#x2694; QUESTS`;
-    const fabClass = activeQuestCount > 0 ? " pulse" : " dim";
-    html = html.split("[[QUEST_LINK]]").join(questLinkText);
-    html = html.split('class="nav-quests"').join('class="nav-quests' + fabClass + '"');
 
     // Army count (Enslaved minions)
     html = html.split("[[ARMY_LINK]]").join(`&#x2694; HENRY'S ARMY`);
@@ -2962,11 +3192,11 @@ app.get("/boss/:bossName", async (req, res) => {
       );
     }
 
-    // Fetch active quests to mark already-queued minions
+    // Fetch active/submitted quests to mark already-queued minions
     let activeQuestKeys = new Set();
     try {
       const quests = await fetchQuestsData(sheets);
-      for (const q of quests.filter((q) => q["Status"] === "Active")) {
+      for (const q of quests.filter((q) => q["Status"] === "Active" || q["Status"] === "Submitted")) {
         activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
       }
     } catch {}
@@ -2985,8 +3215,9 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
   const survivalSet = survivalBossNames || new Set();
-  const shieldSvg = `<svg width="14" height="16" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:3px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg>`;
+  const starSvg = `<svg width="14" height="14" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:3px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg>`;
 
+  const recCol = bosses.length > 0 && bosses[0].minions.length > 0 ? findRecurringCol(bosses[0].minions) : null;
   let bossBlocks = "";
   for (const { bossName, minions } of bosses) {
     let rows = "";
@@ -2999,20 +3230,22 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
       const nTotal = (parseFloat(nInt) + parseFloat(nSta) + parseFloat(nTmp) + parseFloat(nRep)).toFixed(1);
       const qKey = bossName + "|" + m["Minion"];
       const onQuest = activeQuestKeys && activeQuestKeys.has(qKey);
+      const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
       let questBtn;
       if (onQuest) {
         questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
       } else if (m["Status"] === "Engaged") {
-        questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sectorName)}" title="Select for quest board">`;
+        questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sectorName)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
       } else {
         questBtn = `<span style="opacity:0.2;">-</span>`;
       }
+      const recurTag = isRec ? `<span style="font-size:0.65em;color:#00f2ff;border:1px solid #00f2ff;padding:1px 4px;margin-left:6px;letter-spacing:1px;vertical-align:middle;">REC</span>` : "";
       const spText = m["Status"] === "Locked" && m["Locked for what?"] ? m["Locked for what?"] : "";
       rows += `
         <tr>
           <td>${questBtn}</td>
           <td title="${escHtml(m["Task"] || "")}">
-            ${escHtml(m["Minion"])}
+            ${escHtml(m["Minion"])}${recurTag}
             ${spText ? `<div style="font-size:0.75em;color:#ff0044;margin-top:2px;text-transform:none;">Requires: ${escHtml(spText)}</div>` : ""}
           </td>
           <td style="color:${sc}; font-weight:bold;">${m["Status"]}</td>
@@ -3028,7 +3261,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
     const isSurvival = survivalSet.has(bossName);
     bossBlocks += `
       <div class="boss-block${isSurvival ? ' survival-boss' : ''}">
-        <h2><a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sectorName)}" class="boss-link">${isSurvival ? shieldSvg + ' ' : ''}${escHtml(bossName)}</a>${isSurvival ? '<span class="survival-tag">GUARDIAN</span>' : ''}</h2>
+        <h2><a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sectorName)}" class="boss-link">${isSurvival ? starSvg + ' ' : ''}${escHtml(bossName)}</a>${isSurvival ? '<span class="survival-tag">GUARDIAN</span>' : ''}</h2>
         <table>
           <thead>
             <tr><th></th><th>Minion</th><th>Status</th><th>INT</th><th>STA</th><th>TMP</th><th>REP</th><th>IMP</th><th>TOTAL</th></tr>
@@ -3059,13 +3292,13 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
     .sector-tag { text-align: center; font-size: 0.7em; color: #888; letter-spacing: 3px; margin-bottom: 30px; }
     .boss-block { margin-bottom: 35px; }
     .boss-block h2 { color: #ff6600; font-size: 1em; letter-spacing: 3px; margin-bottom: 8px; text-shadow: 0 0 8px rgba(255,102,0,0.3); }
-    .boss-block.survival-boss { border-left: 3px solid rgba(255, 68, 68, 0.4); padding-left: 12px; }
+    .boss-block.survival-boss { border-left: 3px solid rgba(255, 234, 0, 0.4); padding-left: 12px; }
     .boss-link { color: #ff6600; text-decoration: none; }
     .boss-link:hover { text-decoration: underline; color: #ffea00; }
     .survival-tag {
-        font-size: 0.6em; color: #ff4444; letter-spacing: 2px; margin-left: 10px;
-        border: 1px solid rgba(255, 68, 68, 0.4); padding: 2px 6px; vertical-align: middle;
-        text-shadow: 0 0 6px rgba(255, 68, 68, 0.3);
+        font-size: 0.6em; color: #ffea00; letter-spacing: 2px; margin-left: 10px;
+        border: 1px solid rgba(255, 234, 0, 0.4); padding: 2px 6px; vertical-align: middle;
+        text-shadow: 0 0 6px rgba(255, 234, 0, 0.3);
     }
     table { width: 100%; border-collapse: collapse; font-size: 0.8em; margin-bottom: 10px; }
     th { padding: 8px; text-align: left; border-bottom: 2px solid #00f2ff; }
@@ -3079,6 +3312,12 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
         background: rgba(255, 102, 0, 0.08);
     }
     .quest-batch-count { color: #ffea00; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
+    .quest-due-label { color: #ff8800; font-size: 0.8em; font-weight: bold; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
+    .quest-batch-due {
+        background: #1a1d26; border: 1px solid #ff8800; color: #ff8800; padding: 5px 8px;
+        font-family: 'Courier New', monospace; font-size: 0.9em; cursor: pointer;
+    }
+    .quest-batch-due:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 136, 0, 0.4); }
     .quest-batch-btn {
         background: #ff6600; color: #0a0b10; border: none; padding: 8px 18px;
         font-family: 'Courier New', monospace; font-weight: bold; font-size: 0.85em;
@@ -3099,6 +3338,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
         ${bossBlocks}
         <div class="quest-batch-bar" style="display:none;">
             <span class="quest-batch-count">0 SELECTED</span>
+            <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
             <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
         </div>
     </div>
@@ -3107,12 +3347,16 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
         var bar = document.querySelector('.quest-batch-bar');
         var countEl = bar.querySelector('.quest-batch-count');
         var btn = bar.querySelector('.quest-batch-btn');
+        var dueInput = bar.querySelector('.quest-batch-due');
+        var dueLabel = bar.querySelector('.quest-due-label');
         var checkboxes = document.querySelectorAll('.quest-chk');
         function updateBar() {
             var checked = document.querySelectorAll('.quest-chk:checked');
             if (checked.length > 0) {
                 bar.style.display = 'flex';
                 countEl.textContent = checked.length + ' SELECTED';
+                var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
+                if (dueLabel) dueLabel.style.display = hasRec ? 'none' : '';
             } else {
                 bar.style.display = 'none';
             }
@@ -3121,6 +3365,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
         btn.addEventListener('click', function() {
             var checked = document.querySelectorAll('.quest-chk:checked');
             if (checked.length === 0) return;
+            var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
             var items = [];
             checked.forEach(function(chk) {
                 items.push({ boss: chk.dataset.boss, minion: chk.dataset.minion, sector: chk.dataset.sector });
@@ -3136,8 +3381,13 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
             redir.type = 'hidden';
             redir.name = 'redirect';
             redir.value = window.location.pathname;
+            var due = document.createElement('input');
+            due.type = 'hidden';
+            due.name = 'dueDate';
+            due.value = hasRec ? '' : (dueInput.value || '');
             form.appendChild(input);
             form.appendChild(redir);
+            form.appendChild(due);
             document.body.appendChild(form);
             form.submit();
         });
@@ -3190,11 +3440,11 @@ app.get("/sector/:sectorName", async (req, res) => {
     }
     const bosses = Object.keys(bossMap).sort().map((b) => ({ bossName: b, minions: bossMap[b] }));
 
-    // Fetch active quests
+    // Fetch active/submitted quests
     let activeQuestKeys = new Set();
     try {
       const quests = await fetchQuestsData(sheets);
-      for (const q of quests.filter((q) => q["Status"] === "Active")) {
+      for (const q of quests.filter((q) => q["Status"] === "Active" || q["Status"] === "Submitted")) {
         activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
       }
     } catch {}
@@ -3213,8 +3463,9 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
 
-  const shieldSvg = `<svg width="14" height="16" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:3px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg>`;
+  const starSvg = `<svg width="14" height="14" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:3px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg>`;
 
+  const recCol = bosses.length > 0 && bosses[0].minions.length > 0 ? findRecurringCol(bosses[0].minions) : null;
   let bossBlocks = "";
   for (const { bossName, sector, minions } of bosses) {
     let rows = "";
@@ -3227,18 +3478,20 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
       const nTotal = (parseFloat(nInt) + parseFloat(nSta) + parseFloat(nTmp) + parseFloat(nRep)).toFixed(1);
       const qKey = bossName + "|" + m["Minion"];
       const onQuest = activeQuestKeys && activeQuestKeys.has(qKey);
+      const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
       let questBtn;
       if (onQuest) {
         questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
       } else if (m["Status"] === "Engaged") {
-        questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}" title="Select for quest board">`;
+        questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
       } else {
         questBtn = `<span style="opacity:0.2;">-</span>`;
       }
+      const recurTag = isRec ? `<span style="font-size:0.65em;color:#00f2ff;border:1px solid #00f2ff;padding:1px 4px;margin-left:6px;letter-spacing:1px;vertical-align:middle;">REC</span>` : "";
       rows += `
         <tr>
           <td>${questBtn}</td>
-          <td title="${escHtml(m["Task"] || "")}">${escHtml(m["Minion"])}</td>
+          <td title="${escHtml(m["Task"] || "")}">${escHtml(m["Minion"])}${recurTag}</td>
           <td style="color:${sc}; font-weight:bold;">${m["Status"]}</td>
           <td>${nInt}</td>
           <td>${nSta}</td>
@@ -3258,7 +3511,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
       <div class="boss-block">
         <h2>
           <a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sector)}" class="boss-link">
-            ${shieldSvg} ${escHtml(bossName)}
+            ${starSvg} ${escHtml(bossName)}
           </a>
           <span class="boss-sector-tag">${escHtml(sector)}</span>
           <span class="boss-pct" style="color:${pctColor};">${pct}%</span>
@@ -3313,6 +3566,12 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
         background: rgba(255, 102, 0, 0.08);
     }
     .quest-batch-count { color: #ffea00; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
+    .quest-due-label { color: #ff8800; font-size: 0.8em; font-weight: bold; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
+    .quest-batch-due {
+        background: #1a1d26; border: 1px solid #ff8800; color: #ff8800; padding: 5px 8px;
+        font-family: 'Courier New', monospace; font-size: 0.9em; cursor: pointer;
+    }
+    .quest-batch-due:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 136, 0, 0.4); }
     .quest-batch-btn {
         background: #ff6600; color: #0a0b10; border: none; padding: 8px 18px;
         font-family: 'Courier New', monospace; font-weight: bold; font-size: 0.85em;
@@ -3333,6 +3592,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
         ${bossBlocks}
         <div class="quest-batch-bar" style="display:none;">
             <span class="quest-batch-count">0 SELECTED</span>
+            <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
             <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
         </div>
         <div style="text-align:center;margin-top:15px;font-size:0.75em;color:#ff6600;">SELECT ENGAGED MINIONS TO ADD TO YOUR QUEST BOARD</div>
@@ -3342,12 +3602,16 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
         var bar = document.querySelector('.quest-batch-bar');
         var countEl = bar.querySelector('.quest-batch-count');
         var btn = bar.querySelector('.quest-batch-btn');
+        var dueInput = bar.querySelector('.quest-batch-due');
+        var dueLabel = bar.querySelector('.quest-due-label');
         var checkboxes = document.querySelectorAll('.quest-chk');
         function updateBar() {
             var checked = document.querySelectorAll('.quest-chk:checked');
             if (checked.length > 0) {
                 bar.style.display = 'flex';
                 countEl.textContent = checked.length + ' SELECTED';
+                var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
+                if (dueLabel) dueLabel.style.display = hasRec ? 'none' : '';
             } else {
                 bar.style.display = 'none';
             }
@@ -3356,6 +3620,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
         btn.addEventListener('click', function() {
             var checked = document.querySelectorAll('.quest-chk:checked');
             if (checked.length === 0) return;
+            var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
             var items = [];
             checked.forEach(function(chk) {
                 items.push({ boss: chk.dataset.boss, minion: chk.dataset.minion, sector: chk.dataset.sector });
@@ -3371,8 +3636,13 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
             redir.type = 'hidden';
             redir.name = 'redirect';
             redir.value = '/guardians';
+            var due = document.createElement('input');
+            due.type = 'hidden';
+            due.name = 'dueDate';
+            due.value = hasRec ? '' : (dueInput.value || '');
             form.appendChild(input);
             form.appendChild(redir);
+            form.appendChild(due);
             document.body.appendChild(form);
             form.submit();
         });
@@ -3442,11 +3712,11 @@ app.get("/guardians", async (req, res) => {
 
     const bosses = bossOrder.map((k) => bossGroups[k]);
 
-    // Fetch active quests
+    // Fetch active/submitted quests
     let activeQuestKeys = new Set();
     try {
       const quests = await fetchQuestsData(sheets);
-      for (const q of quests.filter((q) => q["Status"] === "Active")) {
+      for (const q of quests.filter((q) => q["Status"] === "Active" || q["Status"] === "Submitted")) {
         activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
       }
     } catch {}
@@ -3461,7 +3731,7 @@ app.get("/guardians", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Quest Board Page Template
 // ---------------------------------------------------------------------------
-function buildQuestBoardPage(questRows, activeCount, totalCount) {
+function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount = 0) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -3533,7 +3803,12 @@ function buildQuestBoardPage(questRows, activeCount, totalCount) {
     .quest-boss { color: #888; }
     .quest-arrow { color: #ff00ff; margin: 0 8px; }
     .quest-minion { color: #00f2ff; font-weight: bold; }
-    .quest-sector { font-size: 0.75em; color: #ff00ff; margin-bottom: 8px; }
+    .quest-sector { font-size: 0.75em; color: #ff00ff; margin-bottom: 4px; }
+    .quest-subject { font-size: 0.75em; color: #ff00ff; margin-bottom: 8px; }
+    .quest-due { font-size: 0.7em; color: #ff8800; letter-spacing: 1px; display: block; margin-top: 2px; }
+    .quest-overdue { color: #ff0044; font-weight: bold; animation: overdue-pulse 2s ease-in-out infinite; }
+    @keyframes overdue-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .quest-card.overdue { border-color: rgba(255, 0, 68, 0.6); background: rgba(255, 0, 68, 0.06); box-shadow: 0 0 8px rgba(255, 0, 68, 0.2); }
     .quest-suggestion {
         font-size: 0.8em;
         color: #ccc;
@@ -3625,7 +3900,10 @@ function buildQuestBoardPage(questRows, activeCount, totalCount) {
 </head>
 <body>
     <div class="hud-container">
-        <a class="back-link" href="/">&lt; BACK TO HUD</a>
+        <div style="display:flex;gap:10px;margin-bottom:15px;">
+            <a class="back-link" href="/" style="margin-bottom:0;">&lt; BACK TO HUD</a>
+            <a class="back-link" href="/recurring" style="margin-bottom:0;border-color:#00f2ff;color:#00f2ff;">RECURRING (${recurringCount}) &gt;</a>
+        </div>
         <h1>Quest Board</h1>
         <div class="quest-stats">${activeCount} ACTIVE / ${totalCount} TOTAL QUESTS</div>
         ${questRows || '<div class="no-quests">NO QUESTS YET. START ONE FROM POWER RANKINGS.</div>'}
@@ -3653,7 +3931,7 @@ function buildQuestBoardPage(questRows, activeCount, totalCount) {
 // ---------------------------------------------------------------------------
 app.post("/quest/start", async (req, res) => {
   try {
-    const { boss, minion, sector } = req.body;
+    const { boss, minion, sector, dueDate } = req.body;
     if (!boss || !minion || !sector) {
       return res.status(400).send("Missing required fields: boss, minion, sector");
     }
@@ -3661,37 +3939,48 @@ app.post("/quest/start", async (req, res) => {
     const sheets = await getSheets();
     await ensureQuestsSheet(sheets);
 
-    const [defRes, sectorsRes] = await Promise.all([
+    const [defRes, sectorsRes, questsRes] = await Promise.all([
       sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Definitions" }),
       sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Sectors" }),
+      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Quests" }),
     ]);
     const definitions = parseTable(defRes.data.values);
     const sectorsRows = parseTable(sectorsRes.data.values);
+    const questRows = questsRes.data.values || [];
 
     const { proofType, suggestion: fallbackSuggestion } = generateProofSuggestion(sector, definitions);
 
-    // Look up the Task from the Sectors sheet for this specific boss+minion
+    // Look up the Task and Subject from the Sectors sheet for this specific boss+minion
     const matchingRow = sectorsRows.find(
       (r) => r["Boss"] === boss && r["Minion"] === minion && r["Sector"] === sector
     );
     const taskDetail = (matchingRow && matchingRow["Task"]) ? matchingRow["Task"] : fallbackSuggestion;
+    const subject = (matchingRow && matchingRow["Subject"]) || "";
+    const recCol = findRecurringCol(sectorsRows);
+    const isRecurring = matchingRow && recCol && (matchingRow[recCol] || "").toUpperCase() === "X";
 
-    const questId = generateQuestId();
-    const today = new Date().toISOString().slice(0, 10);
+    // Check for an existing Abandoned quest to reactivate
+    const effectiveDueDate = isRecurring ? "" : (dueDate || "");
+    const abandonedRow = findAbandonedQuestRow(questRows, boss, minion, sector);
+    if (abandonedRow) {
+      await reactivateQuest(sheets, questRows, abandonedRow, { proofType, taskDetail, dueDate: effectiveDueDate, subject, recurring: isRecurring ? "X" : "" });
+    } else {
+      const questId = generateQuestId();
+      const today = new Date().toISOString().slice(0, 10);
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: "Quests!A:O",
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: {
+          values: [[questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", "", isRecurring ? "" : (dueDate || ""), subject, isRecurring ? "X" : ""]],
+        },
+      });
+    }
 
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: "Quests!A:L",
-      valueInputOption: "RAW",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: {
-        values: [[questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", ""]],
-      },
-    });
+    await updateSectorsQuestStatus(sheets, sector, boss, minion, "Active", { dueDate: dueDate || "" });
 
-    await updateSectorsQuestStatus(sheets, sector, boss, minion, "Active");
-
-    res.redirect("/quests");
+    res.redirect(isRecurring ? "/recurring" : "/quests");
   } catch (err) {
     console.error("Quest start error:", err);
     res.status(500).send(`<pre style="color:red">Error starting quest: ${err.message}</pre>`);
@@ -3701,7 +3990,7 @@ app.post("/quest/start", async (req, res) => {
 // Batch add multiple minions to quest board at once
 app.post("/quest/start-batch", async (req, res) => {
   try {
-    let { items, redirect } = req.body;
+    let { items, redirect, dueDate } = req.body;
     // items is a JSON string: [{ boss, minion, sector }, ...]
     if (typeof items === "string") items = JSON.parse(items);
     if (!Array.isArray(items) || items.length === 0) {
@@ -3711,15 +4000,19 @@ app.post("/quest/start-batch", async (req, res) => {
     const sheets = await getSheets();
     await ensureQuestsSheet(sheets);
 
-    const [defRes, sectorsRes] = await Promise.all([
+    const [defRes, sectorsRes, questsRes] = await Promise.all([
       sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Definitions" }),
       sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Sectors" }),
+      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Quests" }),
     ]);
     const definitions = parseTable(defRes.data.values);
     const sectorsRows = parseTable(sectorsRes.data.values);
+    const questRows = questsRes.data.values || [];
 
     const today = new Date().toISOString().slice(0, 10);
+    const recCol = findRecurringCol(sectorsRows);
     const newRows = [];
+    let hasRecurring = false;
     for (const item of items) {
       const { boss, minion, sector } = item;
       if (!boss || !minion || !sector) continue;
@@ -3729,28 +4022,42 @@ app.post("/quest/start-batch", async (req, res) => {
         (r) => r["Boss"] === boss && r["Minion"] === minion && r["Sector"] === sector
       );
       const taskDetail = (matchingRow && matchingRow["Task"]) ? matchingRow["Task"] : fallbackSuggestion;
-      const questId = generateQuestId();
-      newRows.push([questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", ""]);
+      const subject = (matchingRow && matchingRow["Subject"]) || "";
+      const isRecurring = matchingRow && recCol && (matchingRow[recCol] || "").toUpperCase() === "X";
+      if (isRecurring) hasRecurring = true;
+
+      // Check for an existing Abandoned quest to reactivate
+      const effectiveDueDate = isRecurring ? "" : (dueDate || "");
+      const abandonedRow = findAbandonedQuestRow(questRows, boss, minion, sector);
+      if (abandonedRow) {
+        await reactivateQuest(sheets, questRows, abandonedRow, { proofType, taskDetail, dueDate: effectiveDueDate, subject, recurring: isRecurring ? "X" : "" });
+        // Mark it so we don't match it again for another item in the same batch
+        const statusCol = questRows[0].indexOf("Status");
+        if (statusCol >= 0) questRows[abandonedRow - 1][statusCol] = "Active";
+      } else {
+        const questId = generateQuestId();
+        newRows.push([questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", "", effectiveDueDate, subject, isRecurring ? "X" : ""]);
+      }
     }
 
     if (newRows.length > 0) {
       await sheets.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: "Quests!A:L",
+        range: "Quests!A:O",
         valueInputOption: "RAW",
         insertDataOption: "INSERT_ROWS",
         requestBody: { values: newRows },
       });
+    }
 
-      // Sync Quest Status to Sectors for each item
-      for (const item of items) {
-        if (item.boss && item.minion && item.sector) {
-          await updateSectorsQuestStatus(sheets, item.sector, item.boss, item.minion, "Active");
-        }
+    // Sync Quest Status to Sectors for each item
+    for (const item of items) {
+      if (item.boss && item.minion && item.sector) {
+        await updateSectorsQuestStatus(sheets, item.sector, item.boss, item.minion, "Active", { dueDate: dueDate || "" });
       }
     }
 
-    res.redirect(redirect || "/quests");
+    res.redirect(hasRecurring ? "/recurring" : (redirect || "/quests"));
   } catch (err) {
     console.error("Quest start-batch error:", err);
     res.status(500).send(`<pre style="color:red">Error starting quests: ${err.message}</pre>`);
@@ -3926,15 +4233,29 @@ app.get("/quests", async (req, res) => {
     const definitions = parseTable(defRes.data.values);
     const artifactOptions = getArtifactOptions(definitions);
 
-    const statusOrder = ["Active", "Submitted", "Approved", "Rejected"];
     const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Approved: "#00ff9d", Rejected: "#ff0044" };
+    const today = new Date().toISOString().slice(0, 10);
 
     // Only show actionable quests — Active, Submitted, Rejected (not Approved/Abandoned)
-    const visible = quests.filter((q) => q["Status"] !== "Abandoned" && q["Status"] !== "Approved");
+    const visible = quests.filter((q) => q["Status"] !== "Abandoned" && q["Status"] !== "Approved" && (q["Recurring"] || "").toUpperCase() !== "X");
 
-    const sorted = [...visible].sort((a, b) =>
-      statusOrder.indexOf(a["Status"]) - statusOrder.indexOf(b["Status"])
-    );
+    // Sort: Active first (overdue → soonest due → no due), then non-Active at bottom
+    const sorted = [...visible].sort((a, b) => {
+      const aActive = a["Status"] === "Active" || a["Status"] === "Rejected";
+      const bActive = b["Status"] === "Active" || b["Status"] === "Rejected";
+      // Active/Rejected quests above Submitted
+      if (aActive !== bActive) return aActive ? -1 : 1;
+      // Within same group, sort by due date
+      const da = a["Due Date"] || "";
+      const db = b["Due Date"] || "";
+      const overdueA = da && da < today ? 1 : 0;
+      const overdueB = db && db < today ? 1 : 0;
+      if (overdueA !== overdueB) return overdueB - overdueA;
+      if (da && db) return da.localeCompare(db);
+      if (da && !db) return -1;
+      if (!da && db) return 1;
+      return 0;
+    });
 
     const isTeacher = req.cookies && req.cookies.role === "teacher";
     let questRows = "";
@@ -3970,12 +4291,20 @@ app.get("/quests", async (req, res) => {
         submitForm = `<span class="quest-proof-link">${proofDisplay}</span>`;
       }
 
+      const dueDate = q["Due Date"] || "";
+      const isOverdue = dueDate && dueDate < today && isActive;
+      const dueDateDisplay = dueDate
+        ? `<span class="quest-due ${isOverdue ? "quest-overdue" : ""}">${isOverdue ? "OVERDUE: " : "DUE: "}${dueDate}</span>`
+        : "";
+      const subjectDisplay = q["Subject"] ? `<div class="quest-subject">SUBJECT: ${escHtml(q["Subject"])}</div>` : "";
+
       questRows += `
-        <div class="quest-card" data-status="${q["Status"]}">
+        <div class="quest-card${isOverdue ? " overdue" : ""}" data-status="${q["Status"]}">
           <div class="quest-header">
             <span class="quest-id">${q["Quest ID"]}</span>
             <div class="quest-status-col">
               <span class="quest-status" style="color:${sc}">${q["Status"]}</span>
+              ${dueDateDisplay}
               ${isRejected && q["Feedback"] ? `<div class="quest-reject-reason">REASON: ${escHtml(q["Feedback"])}</div>` : ""}
             </div>
           </div>
@@ -3986,6 +4315,7 @@ app.get("/quests", async (req, res) => {
               <span class="quest-minion">${escHtml(q["Minion"])}</span>
             </div>
             <div class="quest-sector">SECTOR: ${escHtml(q["Sector"])}</div>
+            ${subjectDisplay}
             <div class="quest-suggestion">
               <span class="quest-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details available."}
             </div>
@@ -3999,9 +4329,460 @@ app.get("/quests", async (req, res) => {
     }
 
     const activeCount = visible.filter((q) => q["Status"] === "Active").length;
-    res.send(buildQuestBoardPage(questRows, activeCount, visible.length));
+    const recurringCount = quests.filter(q => (q["Recurring"] || "").toUpperCase() === "X" && q["Status"] !== "Abandoned" && q["Status"] !== "Approved").length;
+    res.send(buildQuestBoardPage(questRows, activeCount, visible.length, recurringCount));
   } catch (err) {
     console.error("Quest board error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Recurring Quest Page + Routes
+// ---------------------------------------------------------------------------
+
+function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
+  return `<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Recurring Quests - Sovereign HUD</title>
+    <style>
+    body {
+        background: #0a0b10;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        padding: 20px;
+        text-transform: uppercase;
+        overflow-x: hidden;
+    }
+    .hud-container {
+        border: 2px solid #00f2ff;
+        padding: 20px;
+        box-shadow: 0 0 15px #00f2ff;
+        max-width: 960px;
+        margin: auto;
+    }
+    h1 {
+        text-shadow: 2px 2px #ff00ff;
+        border-bottom: 1px solid #00f2ff;
+        letter-spacing: 2px;
+        text-align: center;
+        margin-bottom: 15px;
+    }
+    .back-link {
+        display: inline-block;
+        color: #00f2ff;
+        text-decoration: none;
+        border: 1px solid #00f2ff;
+        padding: 6px 15px;
+        margin-bottom: 15px;
+        font-size: 0.8em;
+        transition: all 0.2s;
+    }
+    .back-link:hover { background: #00f2ff; color: #0a0b10; }
+    .nav-links { display: flex; gap: 10px; margin-bottom: 15px; }
+    .quest-stats {
+        text-align: center;
+        margin-bottom: 20px;
+        font-size: 0.85em;
+        color: #00f2ff;
+    }
+    .quest-stats span { color: #ffea00; }
+    .rq-card {
+        border: 1px solid rgba(0, 242, 255, 0.3);
+        background: rgba(0, 242, 255, 0.03);
+        border-radius: 6px;
+        padding: 15px;
+        margin-bottom: 20px;
+        transition: border-color 0.2s;
+    }
+    .rq-card:hover { border-color: #00f2ff; }
+    .rq-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: flex-start;
+        margin-bottom: 10px;
+        font-size: 0.75em;
+    }
+    .rq-id { color: #555; }
+    .rq-status { color: #ff6600; font-weight: bold; letter-spacing: 2px; }
+    .rq-status.submitted { color: #ffea00; }
+    .rq-status.rejected { color: #ff0044; }
+    .rq-target { font-size: 1.1em; margin-bottom: 5px; }
+    .rq-boss { color: #888; }
+    .rq-arrow { color: #ff00ff; margin: 0 8px; }
+    .rq-minion { color: #00f2ff; font-weight: bold; }
+    .rq-sector { font-size: 0.75em; color: #ff00ff; margin-bottom: 4px; }
+    .rq-subject { font-size: 0.75em; color: #ff00ff; margin-bottom: 8px; }
+    .rq-task {
+        font-size: 0.8em;
+        color: #ccc;
+        border-left: 2px solid #ff00ff;
+        padding-left: 10px;
+        margin-top: 8px;
+        margin-bottom: 12px;
+        text-transform: none;
+    }
+    .rq-task-label { color: #ff00ff; font-weight: bold; letter-spacing: 1px; }
+    .rq-due { font-size: 0.7em; color: #ff8800; letter-spacing: 1px; }
+    .rq-overdue { color: #ff0044; font-weight: bold; animation: overdue-pulse 2s ease-in-out infinite; }
+    @keyframes overdue-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .rq-log-section {
+        border-top: 1px solid rgba(0, 242, 255, 0.15);
+        margin-top: 12px;
+        padding-top: 10px;
+    }
+    .rq-log-title {
+        font-size: 0.7em;
+        color: #ffea00;
+        letter-spacing: 2px;
+        margin-bottom: 8px;
+    }
+    .rq-log-entry {
+        font-size: 0.75em;
+        color: #aaa;
+        padding: 4px 0 4px 10px;
+        border-left: 2px solid rgba(255, 234, 0, 0.2);
+        margin-bottom: 4px;
+        text-transform: none;
+    }
+    .rq-log-date { color: #ff8800; margin-right: 8px; }
+    .rq-log-author { color: #555; margin-left: 6px; }
+    .rq-log-empty { font-size: 0.7em; color: #555; font-style: italic; text-transform: none; }
+    .rq-log-form {
+        display: flex;
+        gap: 8px;
+        margin-top: 10px;
+        align-items: flex-end;
+        flex-wrap: wrap;
+    }
+    .rq-log-form input[type="date"] {
+        background: #1a1d26;
+        border: 1px solid #ff8800;
+        color: #ff8800;
+        padding: 6px 8px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+    }
+    .rq-log-form input[type="date"]:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
+    .rq-log-form textarea {
+        flex: 1;
+        min-width: 200px;
+        background: #1a1d26;
+        border: 1px solid #333;
+        color: #00f2ff;
+        padding: 6px 10px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+        text-transform: none;
+        resize: vertical;
+        min-height: 36px;
+        max-height: 120px;
+    }
+    .rq-log-form textarea:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
+    .rq-log-btn {
+        background: none;
+        border: 1px solid #00f2ff;
+        color: #00f2ff;
+        padding: 6px 15px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+        cursor: pointer;
+        text-transform: uppercase;
+        transition: all 0.2s;
+        white-space: nowrap;
+    }
+    .rq-log-btn:hover { background: #00f2ff; color: #0a0b10; }
+    .rq-complete-form { margin-top: 12px; text-align: right; }
+    .rq-complete-btn {
+        background: none;
+        border: 1px solid #00ff9d;
+        color: #00ff9d;
+        padding: 8px 20px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.8em;
+        cursor: pointer;
+        text-transform: uppercase;
+        transition: all 0.2s;
+        letter-spacing: 2px;
+    }
+    .rq-complete-btn:hover { background: #00ff9d; color: #0a0b10; box-shadow: 0 0 10px rgba(0, 255, 157, 0.4); }
+    .rq-abandon-btn {
+        background: none;
+        border: 1px solid #ff0044;
+        color: #ff0044;
+        padding: 8px 20px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.8em;
+        cursor: pointer;
+        text-transform: uppercase;
+        transition: all 0.2s;
+        letter-spacing: 2px;
+    }
+    .rq-abandon-btn:hover { background: #ff0044; color: #0a0b10; box-shadow: 0 0 8px rgba(255, 0, 68, 0.5); }
+    .rq-card-logged { opacity: 0.55; }
+    .rq-card-logged:hover { opacity: 0.85; }
+    .rq-logged-badge {
+        font-size: 0.75em; color: #00ff9d; margin-bottom: 8px;
+        letter-spacing: 1px; text-transform: none;
+        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .rq-separator {
+        text-align: center; margin: 25px 0 20px;
+        border-top: 1px solid rgba(0, 255, 157, 0.25);
+        position: relative;
+    }
+    .rq-separator span {
+        background: #0a0b10; color: #00ff9d; font-size: 0.7em;
+        letter-spacing: 2px; padding: 0 12px;
+        position: relative; top: -0.65em;
+    }
+    .no-quests { text-align: center; color: #555; padding: 40px; font-size: 0.9em; }
+    @media (max-width: 600px) {
+        body { padding: 10px; }
+        .hud-container { padding: 15px; }
+        .rq-log-form { flex-direction: column; }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <div class="nav-links">
+            <a class="back-link" href="/">&lt; BACK TO HUD</a>
+            <a class="back-link" href="/quests">QUEST BOARD &gt;</a>
+        </div>
+        <h1>Recurring Quests</h1>
+        <div class="quest-stats"><span>${loggedCount}</span> LOGGED TODAY / <span>${totalCount}</span> TOTAL</div>
+        ${questCards || '<div class="no-quests">NO RECURRING QUESTS. MARK A MINION AS RECURRING TO GET STARTED.</div>'}
+    </div>
+    <script>
+    function confirmComplete(form) {
+        return confirm('Submit this recurring quest for teacher review?');
+    }
+    function confirmAbandon(form) {
+        return confirm('Abandon this recurring quest?');
+    }
+    </script>
+</body>
+</html>`;
+}
+
+app.get("/recurring", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [quests, questLogs] = await Promise.all([
+      fetchQuestsData(sheets),
+      fetchQuestLogData(sheets),
+    ]);
+
+    // All recurring quests that aren't done or abandoned (includes Submitted for display)
+    const recurring = quests.filter((q) => (q["Recurring"] || "").toUpperCase() === "X" && q["Status"] !== "Abandoned" && q["Status"] !== "Approved");
+    const activeRecurring = recurring.filter((q) => q["Status"] === "Active" || q["Status"] === "Rejected");
+    const today = new Date().toISOString().slice(0, 10);
+    const loggedCount = getLoggedTodayCount(questLogs, activeRecurring);
+    const isTeacher = req.cookies && req.cookies.role === "teacher";
+
+    // Group logs by Quest ID
+    const logsByQuest = {};
+    for (const log of questLogs) {
+      const qid = log["Quest ID"];
+      if (!logsByQuest[qid]) logsByQuest[qid] = [];
+      logsByQuest[qid].push(log);
+    }
+    // Sort logs descending by date within each group
+    for (const qid of Object.keys(logsByQuest)) {
+      logsByQuest[qid].sort((a, b) => (b["Date"] || "").localeCompare(a["Date"] || ""));
+    }
+
+    // Build set of quest IDs logged today
+    const loggedTodayIds = new Set();
+    for (const log of questLogs) {
+      if ((log["Date"] || "").slice(0, 10) === today) loggedTodayIds.add(log["Quest ID"]);
+    }
+
+    // Split into not-logged-today (top) and logged-today (bottom)
+    const notLoggedToday = recurring.filter(q => !loggedTodayIds.has(q["Quest ID"]));
+    const loggedToday = recurring.filter(q => loggedTodayIds.has(q["Quest ID"]));
+
+    function buildCard(q) {
+      const qid = q["Quest ID"];
+      const logs = logsByQuest[qid] || [];
+      const recent = logs.slice(0, 3);
+      const hasLogToday = loggedTodayIds.has(qid);
+
+      const statusClass = q["Status"] === "Submitted" ? " submitted" : q["Status"] === "Rejected" ? " rejected" : "";
+      const subjectDisplay = q["Subject"] ? `<div class="rq-subject">SUBJECT: ${escHtml(q["Subject"])}</div>` : "";
+
+      // Find today's log note for the "logged" badge
+      let todayNote = "";
+      if (hasLogToday) {
+        const todayLog = logs.find(l => (l["Date"] || "").slice(0, 10) === today);
+        if (todayLog) todayNote = escHtml(todayLog["Note"] || "");
+      }
+      const loggedBadge = hasLogToday
+        ? `<div class="rq-logged-badge">\u2705 LOGGED TODAY${todayNote ? ": " + todayNote : ""}</div>`
+        : "";
+
+      let logEntries = "";
+      if (recent.length > 0) {
+        for (const log of recent) {
+          logEntries += `<div class="rq-log-entry"><span class="rq-log-date">${escHtml(log["Date"] || "")}</span>${escHtml(log["Note"] || "")}<span class="rq-log-author">${escHtml(log["Author"] || "")}</span></div>`;
+        }
+        if (logs.length > 3) {
+          logEntries += `<div class="rq-log-entry" style="color:#555;font-style:italic;">+ ${logs.length - 3} more entries</div>`;
+        }
+      } else {
+        logEntries = `<div class="rq-log-empty">No progress logged yet.</div>`;
+      }
+
+      const logForm = `<form class="rq-log-form" method="POST" action="/recurring/log">
+            <input type="hidden" name="questId" value="${qid}">
+            <input type="date" name="date" value="${today}">
+            <textarea name="note" placeholder="What did you do today?" required></textarea>
+            <button type="submit" class="rq-log-btn">LOG UPDATE</button>
+          </form>`;
+
+      const isActive = q["Status"] === "Active" || q["Status"] === "Rejected";
+      let actionControls = "";
+      if (isActive || isTeacher) {
+        actionControls = `<div class="rq-complete-form" style="display:flex;gap:10px;justify-content:flex-end;">`;
+        if (isTeacher) {
+          actionControls += `<form method="POST" action="/quest/remove" onsubmit="return confirmAbandon(this)" style="margin:0;">
+                <input type="hidden" name="questId" value="${qid}">
+                <button type="submit" class="rq-abandon-btn">ABANDON</button>
+              </form>`;
+        }
+        if (isActive) {
+          actionControls += `<form method="POST" action="/recurring/complete" onsubmit="return confirmComplete(this)" style="margin:0;">
+                <input type="hidden" name="questId" value="${qid}">
+                <button type="submit" class="rq-complete-btn">SUBMIT FOR REVIEW</button>
+              </form>`;
+        }
+        actionControls += `</div>`;
+      }
+
+      const rejectedNote = q["Status"] === "Rejected" && q["Feedback"]
+        ? `<div style="font-size:0.75em;color:#ff0044;margin-top:4px;text-transform:none;">REJECTED: ${escHtml(q["Feedback"])}</div>`
+        : "";
+
+      return `
+        <div class="rq-card${hasLogToday ? " rq-card-logged" : ""}">
+          <div class="rq-header">
+            <span class="rq-id">${qid}</span>
+            <div style="text-align:right;">
+              <span class="rq-status${statusClass}">${q["Status"]}</span>
+            </div>
+          </div>
+          <div class="rq-target">
+            <span class="rq-boss">${escHtml(q["Boss"])}</span>
+            <span class="rq-arrow">&gt;</span>
+            <span class="rq-minion">${escHtml(q["Minion"])}</span>
+          </div>
+          <div class="rq-sector">SECTOR: ${escHtml(q["Sector"])}</div>
+          ${subjectDisplay}
+          <div class="rq-task">
+            <span class="rq-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details."}
+          </div>
+          ${rejectedNote}
+          ${loggedBadge}
+          <div class="rq-log-section">
+            <div class="rq-log-title">PROGRESS LOG (${logs.length} entries)</div>
+            ${logEntries}
+            ${logForm}
+          </div>
+          ${actionControls}
+        </div>`;
+    }
+
+    let questCards = "";
+    for (const q of notLoggedToday) questCards += buildCard(q);
+    if (notLoggedToday.length > 0 && loggedToday.length > 0) {
+      questCards += `<div class="rq-separator"><span>\u2713 LOGGED TODAY (${loggedToday.length})</span></div>`;
+    }
+    for (const q of loggedToday) questCards += buildCard(q);
+
+    res.send(buildRecurringPage(questCards, recurring.length, loggedCount, isTeacher));
+  } catch (err) {
+    console.error("Recurring quest page error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+app.post("/recurring/log", async (req, res) => {
+  try {
+    const { questId, date, note } = req.body;
+    if (!questId || !note) {
+      return res.status(400).send("Quest ID and note are required.");
+    }
+    const author = req.cookies.userName || "Unknown";
+    const logDate = date || new Date().toISOString().slice(0, 10);
+
+    const sheets = await getSheets();
+    await ensureQuestLogSheet(sheets);
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quest_Log!A:D",
+      valueInputOption: "RAW",
+      insertDataOption: "INSERT_ROWS",
+      requestBody: { values: [[questId, logDate, note, author]] },
+    });
+
+    res.redirect("/recurring");
+  } catch (err) {
+    console.error("Recurring log error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+app.post("/recurring/complete", async (req, res) => {
+  try {
+    const { questId } = req.body;
+    if (!questId) return res.status(400).send("Quest ID is required.");
+
+    const sheets = await getSheets();
+    const questsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quests",
+    });
+    const rows = questsRes.data.values || [];
+    if (rows.length === 0) return res.status(404).send("No quests found.");
+
+    const headers = rows[0];
+    const idCol = headers.indexOf("Quest ID");
+    const statusCol = headers.indexOf("Status");
+    const completedCol = headers.indexOf("Date Completed");
+    if (idCol < 0 || statusCol < 0) return res.status(500).send("Quests sheet missing required columns.");
+
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][idCol] === questId) { targetRow = i + 1; break; }
+    }
+    if (targetRow < 0) return res.status(404).send("Quest not found.");
+
+    const today = new Date().toISOString().slice(0, 10);
+    const colLetter = (idx) => idx < 26 ? String.fromCharCode(65 + idx) : String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
+    const updates = [
+      { range: `Quests!${colLetter(statusCol)}${targetRow}`, values: [["Submitted"]] },
+    ];
+    if (completedCol >= 0) {
+      updates.push({ range: `Quests!${colLetter(completedCol)}${targetRow}`, values: [[today]] });
+    }
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: "RAW", data: updates },
+    });
+
+    // Update Sectors quest status to Submitted
+    const quest = {};
+    for (let c = 0; c < headers.length; c++) quest[headers[c]] = (rows[targetRow - 1] || [])[c] || "";
+    await updateSectorsQuestStatus(sheets, quest["Sector"], quest["Boss"], quest["Minion"], "Submitted");
+
+    res.redirect("/recurring");
+  } catch (err) {
+    console.error("Recurring complete error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
   }
 });
@@ -4251,7 +5032,7 @@ app.get("/army", async (req, res) => {
       }
     }
 
-    const shieldSvg = `<svg width="12" height="14" viewBox="0 0 18 20" fill="none" style="vertical-align:middle;margin-right:2px;"><path d="M9 0L0 3.5V9C0 14 3.8 18.5 9 20C14.2 18.5 18 14 18 9V3.5L9 0Z" fill="rgba(255,68,68,0.3)" stroke="#ff4444" stroke-width="1.5"/><text x="9" y="13" text-anchor="middle" fill="#ff4444" font-size="8" font-family="monospace" font-weight="bold">S</text></svg>`;
+    const starSvg = `<svg width="12" height="12" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:2px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5" filter="url(#armyStarGlow)"/><defs><filter id="armyStarGlow"><feGaussianBlur stdDeviation="1.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs></svg>`;
 
     const totals = {
       intel: getStat(commandCenter, "Intel").totalPossible,
@@ -4289,7 +5070,7 @@ app.get("/army", async (req, res) => {
         const isSurvival = survivalBossKeys.has(`${sector}|${m["Boss"]}`);
         const isRecent = m._enslavedDate >= recentCutoff;
         const bossCell = isSurvival
-          ? `<td class="survival-boss-cell">${shieldSvg} ${escHtml(m["Boss"])}</td>`
+          ? `<td class="survival-boss-cell">${starSvg} ${escHtml(m["Boss"])}</td>`
           : `<td>${escHtml(m["Boss"])}</td>`;
         const trClass = [isSurvival && "survival-row", isRecent && "recent-row"].filter(Boolean).join(" ");
         rows += `<tr${trClass ? ` class="${trClass}"` : ''}>
@@ -4391,7 +5172,7 @@ app.get("/army", async (req, res) => {
     tr:hover td { background: rgba(0, 255, 157, 0.05); }
     tr.survival-row { background: rgba(255, 68, 68, 0.04); }
     tr.survival-row:hover td { background: rgba(255, 68, 68, 0.08); }
-    .survival-boss-cell { color: #ff4444; text-shadow: 0 0 6px rgba(255, 68, 68, 0.3); }
+    .survival-boss-cell { color: #ffea00; text-shadow: 0 0 6px rgba(255, 234, 0, 0.3); }
     .date-col { color: #888; font-size: 0.85em; }
     tr.recent-row { background: rgba(0, 255, 157, 0.06); }
     tr.recent-row td { border-left: 0; }
@@ -4450,12 +5231,304 @@ app.get("/army", async (req, res) => {
             </svg>
         </div>
         <div class="army-subtitle">${enslaved.length} MINIONS ENSLAVED</div>
+        <div style="text-align:center;margin-bottom:20px;"><a href="/defiant" style="color:#ff6600;font-size:0.75em;letter-spacing:2px;text-decoration:none;border:1px solid rgba(255,102,0,0.4);padding:5px 12px;transition:all 0.2s;" onmouseover="this.style.background='#ff6600';this.style.color='#0a0b10'" onmouseout="this.style.background='';this.style.color='#ff6600'">VIEW DEFIANT MINIONS &gt;</a></div>
         ${sectionsHtml || '<div class="empty-army">NO MINIONS ENSLAVED YET. CONQUER THEM THROUGH THE QUEST BOARD.</div>'}
     </div>
 </body>
 </html>`);
   } catch (err) {
     console.error("Army page error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Defiant Minions Page — all non-enslaved minions with quest board selection
+// ---------------------------------------------------------------------------
+app.get("/defiant", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [data, quests] = await Promise.all([fetchSheetData(sheets), fetchQuestsData(sheets)]);
+    const { sectors, commandCenter } = data;
+
+    // Active quest keys (Active + Submitted)
+    const activeQuestKeys = new Set();
+    for (const q of quests.filter((q) => q["Status"] === "Active" || q["Status"] === "Submitted")) {
+      activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
+    }
+
+    // Detect recurring and survival columns
+    const recCol = findRecurringCol(sectors);
+    let survivalCol = null;
+    if (sectors.length > 0) {
+      survivalCol = Object.keys(sectors[0]).find((k) => k.toLowerCase().includes("survival"));
+    }
+    const survivalBossKeys = new Set();
+    if (survivalCol) {
+      for (const r of sectors) {
+        if ((r[survivalCol] || "").toUpperCase() === "X") survivalBossKeys.add(`${r["Sector"]}|${r["Boss"]}`);
+      }
+    }
+
+    const starSvg = `<svg width="12" height="12" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:2px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg>`;
+
+    // Stat totals for normalization
+    const getStat = (cc, name) => {
+      const row = cc.find((r) => (r["CORE STATS"] || "").toLowerCase() === name.toLowerCase());
+      return { totalPossible: parseFloat(row?.["Total Possible"]) || 1 };
+    };
+    const totals = {
+      intel: getStat(commandCenter, "Intel").totalPossible,
+      stamina: getStat(commandCenter, "Stamina").totalPossible,
+      tempo: getStat(commandCenter, "Tempo").totalPossible,
+      rep: getStat(commandCenter, "Reputation").totalPossible,
+    };
+    const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+
+    // Filter non-enslaved minions, group by sector
+    const sectorMap = {};
+    for (const m of sectors) {
+      if (m["Status"] === "Enslaved") continue;
+      const sec = m["Sector"] || "Unknown";
+      if (!sectorMap[sec]) sectorMap[sec] = [];
+      sectorMap[sec].push(m);
+    }
+
+    let sectionsHtml = "";
+    let totalDefiant = 0;
+    for (const sector of Object.keys(sectorMap).sort()) {
+      const minions = sectorMap[sector];
+      totalDefiant += minions.length;
+      let rows = "";
+      for (const m of minions) {
+        const nInt = norm(m["INTELLIGENCE"], totals.intel);
+        const nSta = norm(m["STAMINA"], totals.stamina);
+        const nTmp = norm(m["TEMPO"], totals.tempo);
+        const nRep = norm(m["REPUTATION"], totals.rep);
+        const nTotal = (parseFloat(nInt) + parseFloat(nSta) + parseFloat(nTmp) + parseFloat(nRep)).toFixed(1);
+        const isSurvival = survivalBossKeys.has(`${sector}|${m["Boss"]}`);
+        const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
+        const qKey = m["Boss"] + "|" + m["Minion"];
+        const onQuest = activeQuestKeys.has(qKey);
+
+        let questBtn;
+        if (onQuest) {
+          questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
+        } else if (m["Status"] === "Engaged") {
+          questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(m["Boss"])}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
+        } else {
+          questBtn = `<span style="opacity:0.2;">-</span>`;
+        }
+
+        const recurTag = isRec ? `<span class="rec-tag">REC</span>` : "";
+        const bossCell = isSurvival
+          ? `<td class="survival-boss-cell">${starSvg} ${escHtml(m["Boss"])}</td>`
+          : `<td>${escHtml(m["Boss"])}</td>`;
+        const statusColor = { Engaged: "#ff6600", Locked: "#555" };
+        const sc = statusColor[m["Status"]] || "#555";
+        const spText = m["Status"] === "Locked" && m["Locked for what?"] ? m["Locked for what?"] : "";
+
+        rows += `<tr${isSurvival ? ' class="survival-row"' : ''}>
+          <td>${questBtn}</td>
+          ${bossCell}
+          <td title="${escHtml(m["Task"] || "")}">
+            ${escHtml(m["Minion"])}${recurTag}
+            ${spText ? `<div style="font-size:0.75em;color:#ff0044;margin-top:2px;text-transform:none;">Requires: ${escHtml(spText)}</div>` : ""}
+          </td>
+          <td style="color:${sc};font-weight:bold;">${m["Status"]}</td>
+          <td style="color:#00f2ff">${nInt}</td>
+          <td style="color:#00ff9d">${nSta}</td>
+          <td style="color:#ff00ff">${nTmp}</td>
+          <td style="color:#ff8800">${nRep}</td>
+          <td>${m["Impact(1-3)"] || ""}</td>
+          <td style="color:#ffea00;font-weight:bold;">${nTotal}</td>
+        </tr>`;
+      }
+      const engaged = minions.filter((m) => m["Status"] === "Engaged").length;
+      const locked = minions.filter((m) => m["Status"] === "Locked").length;
+      sectionsHtml += `
+        <div class="defiant-sector">
+          <h2>${escHtml(sector)} <span class="defiant-count">(${engaged} engaged, ${locked} locked)</span></h2>
+          <table>
+            <thead><tr>
+              <th></th><th>Boss</th><th>Minion</th><th>Status</th>
+              <th>INT</th><th>STA</th><th>TMP</th><th>REP</th><th>IMP</th><th>Total</th>
+            </tr></thead>
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`;
+    }
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Defiant Minions - Sovereign HUD</title>
+    <style>
+    body {
+        background: #0a0b10;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        padding: 20px;
+        text-transform: uppercase;
+        overflow-x: hidden;
+    }
+    .hud-container {
+        border: 2px solid #ff6600;
+        padding: 20px;
+        box-shadow: 0 0 15px rgba(255, 102, 0, 0.5);
+        max-width: 1060px;
+        margin: auto;
+    }
+    h1 {
+        text-shadow: 2px 2px #ff00ff;
+        letter-spacing: 2px;
+        text-align: center;
+        margin-bottom: 5px;
+        color: #ff6600;
+    }
+    .defiant-subtitle {
+        text-align: center;
+        color: #ff6600;
+        font-size: 0.85em;
+        margin-bottom: 25px;
+        letter-spacing: 3px;
+    }
+    .back-link {
+        display: inline-block;
+        color: #00f2ff;
+        text-decoration: none;
+        border: 1px solid #00f2ff;
+        padding: 6px 15px;
+        margin-bottom: 15px;
+        font-size: 0.8em;
+        transition: all 0.2s;
+    }
+    .back-link:hover { background: #00f2ff; color: #0a0b10; }
+    .defiant-sector {
+        margin-bottom: 25px;
+        border: 1px solid rgba(255, 102, 0, 0.2);
+        background: rgba(255, 102, 0, 0.02);
+        border-radius: 6px;
+        padding: 15px;
+    }
+    .defiant-sector h2 {
+        color: #ff00ff;
+        font-size: 1em;
+        letter-spacing: 2px;
+        margin: 0 0 12px 0;
+        border-bottom: 1px solid rgba(255, 0, 255, 0.3);
+        padding-bottom: 8px;
+    }
+    .defiant-count { color: #ff6600; font-size: 0.85em; }
+    .rec-tag {
+        font-size: 0.65em; color: #00f2ff; border: 1px solid #00f2ff;
+        padding: 1px 4px; margin-left: 6px; letter-spacing: 1px; vertical-align: middle;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
+    th {
+        background: #1a1d26;
+        color: #ffea00;
+        padding: 8px 6px;
+        text-align: left;
+        border-bottom: 2px solid #ff6600;
+    }
+    td { padding: 6px; border-bottom: 1px solid #1a1d26; }
+    tr:hover td { background: rgba(255, 102, 0, 0.05); }
+    tr.survival-row { background: rgba(255, 234, 0, 0.04); }
+    tr.survival-row:hover td { background: rgba(255, 234, 0, 0.08); }
+    .survival-boss-cell { color: #ffea00; text-shadow: 0 0 6px rgba(255, 234, 0, 0.3); }
+    .quest-chk { cursor: pointer; accent-color: #ff6600; }
+    .quest-batch-bar {
+        position: fixed; bottom: 0; left: 0; right: 0;
+        background: #1a1d26; border-top: 2px solid #ff6600;
+        padding: 10px 20px; z-index: 100;
+        display: none; align-items: center; gap: 12px;
+        font-family: 'Courier New', monospace; text-transform: uppercase;
+    }
+    .batch-count { color: #ff6600; font-weight: bold; letter-spacing: 2px; font-size: 0.85em; }
+    .batch-due-label { color: #888; font-size: 0.75em; letter-spacing: 1px; }
+    .batch-due-input { background: #0a0b10; color: #ff6600; border: 1px solid #ff6600; padding: 4px 8px; font-family: 'Courier New', monospace; }
+    .batch-submit {
+        background: #ff6600; color: #0a0b10; border: none; padding: 8px 18px;
+        font-family: 'Courier New', monospace; text-transform: uppercase; font-weight: bold;
+        letter-spacing: 2px; cursor: pointer; transition: all 0.2s;
+    }
+    .batch-submit:hover { background: #ffea00; box-shadow: 0 0 12px rgba(255,234,0,0.4); }
+    @media (max-width: 600px) {
+        body { padding: 10px; }
+        .hud-container { padding: 15px; }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <div style="display:flex;gap:10px;margin-bottom:15px;">
+            <a class="back-link" href="/army">&lt; ARMY</a>
+            <a class="back-link" href="/">&lt; HUD</a>
+        </div>
+        <h1>Defiant Minions</h1>
+        <div class="defiant-subtitle">${totalDefiant} MINIONS REMAIN UNCONQUERED</div>
+        ${sectionsHtml || '<div style="text-align:center;color:#00ff9d;padding:40px;">ALL MINIONS ENSLAVED. TOTAL DOMINATION ACHIEVED.</div>'}
+    </div>
+    <div class="quest-batch-bar" id="batchBar">
+        <span class="batch-count" id="batchCount">0 SELECTED</span>
+        <label class="batch-due-label" id="dueLabel">DUE: <input type="date" class="batch-due-input" id="dueInput"></label>
+        <button type="button" class="batch-submit" id="batchBtn">ADD TO QUEST BOARD</button>
+    </div>
+    <script>
+    (function() {
+        var bar = document.getElementById('batchBar');
+        var countEl = document.getElementById('batchCount');
+        var btn = document.getElementById('batchBtn');
+        var dueLabel = document.getElementById('dueLabel');
+        var dueInput = document.getElementById('dueInput');
+        function updateBar() {
+            var checked = document.querySelectorAll('.quest-chk:checked');
+            if (checked.length > 0) {
+                bar.style.display = 'flex';
+                countEl.textContent = checked.length + ' SELECTED';
+                var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
+                if (dueLabel) dueLabel.style.display = hasRec ? 'none' : '';
+            } else { bar.style.display = 'none'; }
+        }
+        document.addEventListener('change', function(e) { if (e.target.classList.contains('quest-chk')) updateBar(); });
+        btn.addEventListener('click', function() {
+            var checked = document.querySelectorAll('.quest-chk:checked');
+            if (checked.length === 0) return;
+            var hasRec = Array.from(checked).some(function(c) { return c.dataset.recurring === '1'; });
+            var items = [];
+            checked.forEach(function(chk) {
+                items.push({ boss: chk.dataset.boss, minion: chk.dataset.minion, sector: chk.dataset.sector });
+            });
+            var form = document.createElement('form');
+            form.method = 'POST';
+            form.action = '/quest/start-batch';
+            var input = document.createElement('input');
+            input.type = 'hidden';
+            input.name = 'items';
+            input.value = JSON.stringify(items);
+            var redir = document.createElement('input');
+            redir.type = 'hidden';
+            redir.name = 'redirect';
+            redir.value = '/defiant';
+            var due = document.createElement('input');
+            due.type = 'hidden';
+            due.name = 'dueDate';
+            due.value = hasRec ? '' : (dueInput.value || '');
+            form.appendChild(input);
+            form.appendChild(redir);
+            form.appendChild(due);
+            document.body.appendChild(form);
+            form.submit();
+        });
+    })();
+    </script>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("Defiant page error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
   }
 });
@@ -5708,7 +6781,7 @@ app.get("/admin/quests", async (req, res) => {
     const quests = await fetchQuestsData(sheets);
 
     const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Approved: "#00ff9d", Rejected: "#ff0044" };
-    // Only show Submitted quests for approval
+    // Show all Submitted quests for approval (including recurring)
     const actionable = quests.filter((q) => q["Status"] === "Submitted");
     // Recently approved (last 5 days) for undo
     const recentCutoff = new Date(Date.now() - 5 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -5758,7 +6831,7 @@ app.get("/admin/quests", async (req, res) => {
           <div class="qa-target">
             <span class="qa-boss">${escHtml(q["Boss"])}</span>
             <span class="qa-arrow">&gt;</span>
-            <span class="qa-minion">${escHtml(q["Minion"])}</span>
+            <span class="qa-minion">${escHtml(q["Minion"])}</span>${(q["Recurring"] || "").toUpperCase() === "X" ? '<span style="font-size:0.65em;color:#00f2ff;border:1px solid #00f2ff;padding:1px 4px;margin-left:6px;letter-spacing:1px;vertical-align:middle;">REC</span>' : ''}
           </div>
           <div class="qa-sector">SECTOR: ${escHtml(q["Sector"])}</div>
           <div class="qa-task"><span class="qa-task-label">TASK:</span> ${q["Suggested By AI"] || "No details"}</div>
@@ -5846,7 +6919,7 @@ app.get("/admin/quests", async (req, res) => {
 </head>
 <body>
     <div class="hud-container">
-        <a class="back-link" href="/admin">&lt; BACK TO ADMIN</a>
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin" style="margin-bottom:0;">&lt; ADMIN</a><a class="back-link" href="/" style="margin-bottom:0;">&lt; HUD</a></div>
         <h1>Quest Approval</h1>
         <div class="qa-summary">
             <span style="color:#ffea00;">${counts.Submitted} PENDING</span>
@@ -6350,7 +7423,7 @@ app.get("/admin/locks", async (req, res) => {
 </head>
 <body>
     <div class="hud-container">
-        <a class="back-link" href="/admin">&lt; BACK TO ADMIN</a>
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin" style="margin-bottom:0;">&lt; ADMIN</a><a class="back-link" href="/" style="margin-bottom:0;">&lt; HUD</a></div>
         <h1>Lock/Unlock Management</h1>
         <div class="lock-subtitle">${allMinions.filter((m) => m.status === "Locked").length} LOCKED &bull; ${allMinions.filter((m) => m.status === "Engaged").length} ENGAGED &bull; ${allMinions.filter((m) => m.status === "Enslaved").length} ENSLAVED</div>
         <table>
@@ -7111,7 +8184,7 @@ app.get("/admin/manual", async (req, res) => {
 </head>
 <body>
     <div class="hud-container">
-        <a class="back-link" href="/admin">&lt; BACK TO ADMIN</a>
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin" style="margin-bottom:0;">&lt; ADMIN</a><a class="back-link" href="/" style="margin-bottom:0;">&lt; HUD</a></div>
         <h1>&#x270F; Manual Entry</h1>
         <div class="manual-subtitle">ADD NEW OBJECTIVES WITHOUT OPENING GOOGLE SHEETS</div>
         ${successMsg}${addedToQuest}
@@ -7185,6 +8258,14 @@ app.get("/admin/manual", async (req, res) => {
             <div class="quest-toggle">
                 <input type="checkbox" id="addToQuest" name="addToQuest" value="1">
                 <label for="addToQuest">ALSO ADD ENGAGED MINIONS TO QUEST BOARD</label>
+                <div id="me-due-wrap" style="display:none;margin-top:8px;margin-left:24px;">
+                    <label style="color:#ff8800;font-size:0.8em;font-weight:bold;letter-spacing:1px;">DUE DATE: <input type="date" name="dueDate" style="background:#1a1d26;border:1px solid #ff8800;color:#ff8800;padding:5px 8px;font-family:'Courier New',monospace;font-size:0.9em;"></label>
+                </div>
+            </div>
+            <div class="quest-toggle" style="border-color:rgba(0,242,255,0.3);background:rgba(0,242,255,0.05);">
+                <input type="checkbox" id="recurringCheck" name="recurring" value="1">
+                <label for="recurringCheck" style="color:#00f2ff;">RECURRING QUEST (ongoing, like a book)</label>
+                <div style="font-size:0.6em;color:#555;margin-left:30px;text-transform:none;">Recurring quests go on a separate page. Impact can be 1-7. They don't raise Total Possible (pure bonus XP).</div>
             </div>
             <button type="submit" class="submit-btn">ADD MINIONS</button>
         </form>
@@ -7196,6 +8277,33 @@ app.get("/admin/manual", async (req, res) => {
     var meSector = document.getElementById('me-sector');
     var meBoss = document.getElementById('me-boss');
     var rowContainer = document.getElementById('me-minion-rows');
+    var addToQuestCb = document.getElementById('addToQuest');
+    var recurringCb = document.getElementById('recurringCheck');
+    var dueWrap = document.getElementById('me-due-wrap');
+
+    function updateDueWrap() {
+        dueWrap.style.display = (addToQuestCb.checked && !recurringCb.checked) ? 'block' : 'none';
+    }
+    function updateImpactDropdowns() {
+        var max = recurringCb.checked ? 7 : 3;
+        document.querySelectorAll('select[name="impacts[]"]').forEach(function(sel) {
+            var cur = parseInt(sel.value) || 2;
+            var html = '';
+            for (var i = 1; i <= max; i++) {
+                html += '<option value="' + i + '"' + (i === cur ? ' selected' : '') + '>' + i + '</option>';
+            }
+            sel.innerHTML = html;
+        });
+    }
+
+    addToQuestCb.addEventListener('change', updateDueWrap);
+    recurringCb.addEventListener('change', function() {
+        if (recurringCb.checked) {
+            addToQuestCb.checked = true;
+        }
+        updateDueWrap();
+        updateImpactDropdowns();
+    });
 
     // Populate subject dropdown
     var subjNames = Object.keys(SM).sort();
@@ -7325,6 +8433,7 @@ app.get("/admin/manual", async (req, res) => {
         div.querySelectorAll('input[type="text"]').forEach(function(inp) { inp.value = ''; });
         rowContainer.appendChild(div);
         updateRemoveButtons();
+        updateImpactDropdowns();
         div.querySelector('input[name="minions[]"]').focus();
     });
 
@@ -7381,7 +8490,7 @@ app.get("/admin/manual", async (req, res) => {
 
 app.post("/admin/manual", async (req, res) => {
   try {
-    const { sector, boss, subject, addToQuest } = req.body;
+    const { sector, boss, subject, addToQuest, dueDate, recurring } = req.body;
     // Support both single and array form fields
     const minions = [].concat(req.body["minions[]"] || req.body.minion || []).filter(Boolean);
     const tasks = [].concat(req.body["tasks[]"] || req.body.task || []);
@@ -7417,6 +8526,7 @@ app.post("/admin/manual", async (req, res) => {
         subject: subject || "",
         task: tasks[i] || "",
         impact: parseInt(impacts[i]) || 1,
+        recurring: recurring === "1" ? "X" : "",
       });
       if (statusIdx !== -1) row[statusIdx] = minionStatus;
       rows.push({ row, minionName, task: tasks[i] || "", status: minionStatus });
@@ -7441,37 +8551,53 @@ app.post("/admin/manual", async (req, res) => {
       const engagedRows = rows.filter(r => r.status === "Engaged");
       if (engagedRows.length > 0) {
         await ensureQuestsSheet(sheets);
-        const defRes = await sheets.spreadsheets.values.get({
-          spreadsheetId: SPREADSHEET_ID,
-          range: "Definitions",
-        });
+        const [defRes, existingQuestsRes] = await Promise.all([
+          sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Definitions" }),
+          sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Quests" }),
+        ]);
         const definitions = parseTable(defRes.data.values);
+        const existingQuestRows = existingQuestsRes.data.values || [];
         const { proofType, suggestion } = generateProofSuggestion(sector, definitions);
         const today = new Date().toISOString().slice(0, 10);
-        const questRows = [];
+        const newQuestRows = [];
 
+        const isRecurring = recurring === "1";
+        const effectiveDueDate = isRecurring ? "" : (dueDate || "");
         for (const er of engagedRows) {
-          const questId = generateQuestId();
           const taskDetail = er.task || suggestion;
-          questRows.push([questId, boss, er.minionName, sector, "Active", proofType, "", taskDetail, "", today, "", ""]);
+          const abandonedRow = findAbandonedQuestRow(existingQuestRows, boss, er.minionName, sector);
+          if (abandonedRow) {
+            await reactivateQuest(sheets, existingQuestRows, abandonedRow, { proofType, taskDetail, dueDate: effectiveDueDate, subject, recurring: isRecurring ? "X" : "" });
+            const statusCol = existingQuestRows[0].indexOf("Status");
+            if (statusCol >= 0) existingQuestRows[abandonedRow - 1][statusCol] = "Active";
+          } else {
+            const questId = generateQuestId();
+            newQuestRows.push([questId, boss, er.minionName, sector, "Active", proofType, "", taskDetail, "", today, "", "", effectiveDueDate, subject || "", isRecurring ? "X" : ""]);
+          }
         }
 
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: SPREADSHEET_ID,
-          range: "Quests!A:L",
-          valueInputOption: "RAW",
-          insertDataOption: "INSERT_ROWS",
-          requestBody: { values: questRows },
-        });
+        if (newQuestRows.length > 0) {
+          await sheets.spreadsheets.values.append({
+            spreadsheetId: SPREADSHEET_ID,
+            range: "Quests!A:O",
+            valueInputOption: "RAW",
+            insertDataOption: "INSERT_ROWS",
+            requestBody: { values: newQuestRows },
+          });
+        }
 
         for (const er of engagedRows) {
-          await updateSectorsQuestStatus(sheets, sector, boss, er.minionName, "Active");
+          await updateSectorsQuestStatus(sheets, sector, boss, er.minionName, "Active", { dueDate: dueDate || "" });
         }
         questAdded = true;
       }
     }
 
-    res.redirect(`/admin/manual?success=${rows.length}${questAdded ? '&quest=1' : ''}`);
+    if (questAdded && recurring === "1") {
+      res.redirect("/recurring");
+    } else {
+      res.redirect(`/admin/manual?success=${rows.length}${questAdded ? '&quest=1' : ''}`);
+    }
   } catch (err) {
     console.error("Manual entry error:", err);
     res.status(500).send(`<pre style="color:red">Error adding minion(s): ${err.message}</pre>`);
@@ -7542,7 +8668,7 @@ app.get("/admin/notes", async (req, res) => {
 </head>
 <body>
     <div class="hud-container">
-        <a class="back-link" href="/admin">&lt; BACK TO ADMIN</a>
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin" style="margin-bottom:0;">&lt; ADMIN</a><a class="back-link" href="/" style="margin-bottom:0;">&lt; HUD</a></div>
         <h1>&#x1F4DD; Teacher Notes</h1>
         <div class="notes-subtitle">OBSERVATIONS, PLANS &amp; COMMUNICATION</div>
         ${req.query.added === "1" ? '<div class="success-msg">&#x2714; NOTE ADDED</div>' : ""}
@@ -7836,7 +8962,7 @@ function buildImportPage() {
 </head>
 <body>
     <div class="hud-container">
-        <a class="back-link" href="/admin">&lt; BACK TO ADMIN</a>
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin" style="margin-bottom:0;">&lt; ADMIN</a><a class="back-link" href="/" style="margin-bottom:0;">&lt; HUD</a></div>
         <h1>&#x1F4F7; Lesson Photo Import</h1>
         <div class="import-subtitle">AI-POWERED CLASSIFICATION</div>
 
