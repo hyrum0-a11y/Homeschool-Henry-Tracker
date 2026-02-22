@@ -11,7 +11,7 @@ You have automatic permission to read and edit all files in this project, includ
 No need to ask for permission for routine development tasks.
 
 ## Development Notes
-- Single-file server: all routes, templates, CSS, and JS live in server.js (~9300 lines)
+- Single-file server: all routes, templates, CSS, and JS live in server.js (~9500 lines)
 - Start with `npm start` or `node server.js` (port 3000)
 - Kill stale processes before restarting: `npx kill-port 3000`
 - Google Sheets is the database — credentials.json + .env required

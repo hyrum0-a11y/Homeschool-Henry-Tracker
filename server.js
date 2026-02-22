@@ -1080,6 +1080,8 @@ function processAllData(html, data, activeQuestKeys) {
         stamina: parseFloat(row["STAMINA"]) || 0,
         tempo: parseFloat(row["TEMPO"]) || 0,
         rep: parseFloat(row["REPUTATION"]) || 0,
+        coreMeaning: row["The Core Meaning"] || "",
+        interaction: row["Henry's Interaction"] || "",
       };
     }
   }
@@ -1102,14 +1104,28 @@ function processAllData(html, data, activeQuestKeys) {
     }
   }
 
-  // -- BUILD SECTOR HTML (with radar + clickable bosses) --
+  // -- BUILD SECTOR HTML (collapsible summary cards) --
   let bossHtml = "";
   for (const sector in bossMap) {
-    // Sector weight radar chart
     const w = sectorWeights[sector.toUpperCase()];
+
+    // Sector-level totals
+    let sectorEnslaved = 0, sectorTotal = 0, bossCount = 0;
+    for (const bn in bossMap[sector]) {
+      sectorEnslaved += bossMap[sector][bn].enslaved;
+      sectorTotal += bossMap[sector][bn].total;
+      bossCount++;
+    }
+    const sectorPct = sectorTotal > 0 ? ((sectorEnslaved / sectorTotal) * 100).toFixed(0) : 0;
+
+    // Description from Definitions
+    const coreMeaning = w ? escHtml(w.coreMeaning) : "";
+    const interaction = w ? escHtml(w.interaction) : "";
+
+    // Radar chart — shown in card header on the left
     let sectorRadarHtml = "";
     if (w) {
-      sectorRadarHtml = `<div class="sector-radar">${buildRadarSVG(
+      sectorRadarHtml = `<div class="sector-card-radar">${buildRadarSVG(
         [w.intel, w.stamina, w.tempo, w.rep],
         5, 5, 100,
         {
@@ -1122,6 +1138,7 @@ function processAllData(html, data, activeQuestKeys) {
       )}</div>`;
     }
 
+    // Build boss donut rings (hidden until expanded)
     let sectorBossHtml = "";
     const sortedBossNames = Object.keys(bossMap[sector]).sort(
       (a, b) => bossMap[sector][b].total - bossMap[sector][a].total
@@ -1150,12 +1167,12 @@ function processAllData(html, data, activeQuestKeys) {
       const encodedSector = encodeURIComponent(sector);
       const isGuardian = survivalBossKeys.has(`${sector}|${bossName}`);
       const guardianClass = isGuardian ? " boss-guardian" : "";
-      // Gold star sized to fill inner ring space
-      const starSize = Math.round(innerDia * 0.65);
-      const guardianIcon = isGuardian ? `<div class="boss-guardian-star"><svg width="${starSize}" height="${starSize}" viewBox="0 0 20 20"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5" filter="url(#starGlow)"/><defs><filter id="starGlow"><feGaussianBlur stdDeviation="1.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs></svg></div>` : "";
+      const heartW = Math.round(innerDia * 0.4);
+      const heartH = Math.round(heartW * 0.9);
+      const guardianIcon = isGuardian ? `<div class="boss-guardian-heart"><svg width="${heartW}" height="${heartH}" viewBox="0 0 10 9" shape-rendering="crispEdges" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg></div>` : "";
 
       sectorBossHtml += `
-        <a class="boss-link" href="/boss/${encodedBoss}?sector=${encodedSector}" >
+        <a class="boss-link" href="/boss/${encodedBoss}?sector=${encodedSector}">
           <div class="boss-orb-container${guardianClass}">
             <div class="boss-ring-wrap" style="width:${diameter}px; height:${diameter}px;">
               <div class="boss-pie" style="width:${diameter}px; height:${diameter}px; background:${gradient}; ${ringMask}"></div>
@@ -1166,11 +1183,55 @@ function processAllData(html, data, activeQuestKeys) {
         </a>`;
     }
 
-    bossHtml += `<div class="sector-zone" data-sector="${sector.toUpperCase()}"><a class="sector-link" href="/sector/${encodeURIComponent(sector)}">${sector.toUpperCase()}</a>${sectorRadarHtml}<div class="sector-bosses">${sectorBossHtml}</div></div>`;
+    // Status label based on percentage
+    const statusLabel = Number(sectorPct) >= 100 ? "CONQUERED"
+      : Number(sectorPct) >= 75 ? "DOMINATING"
+      : Number(sectorPct) >= 50 ? "ADVANCING"
+      : Number(sectorPct) > 0 ? "INFILTRATING"
+      : "UNCHARTED";
+
+    const sectorId = sector.toUpperCase().replace(/[^A-Z0-9]/g, "");
+
+    // Summary card (grid item)
+    bossHtml += `
+      <div class="sector-card" data-sector="${sectorId}" onclick="toggleSector('${sectorId}')">
+        <div class="sector-card-layout">
+          ${sectorRadarHtml}
+          <div class="sector-card-info">
+            <div class="sector-card-top">
+              <div class="sector-card-name">${sector.toUpperCase()}</div>
+              <span class="sector-card-pct">${sectorPct}%</span>
+            </div>
+            <div class="sector-card-desc">${coreMeaning}</div>
+            <div class="sector-card-sub">${interaction}</div>
+            <div class="sector-card-bar-wrap">
+              <div class="sector-card-bar" style="width:${sectorPct}%;"></div>
+            </div>
+            <div class="sector-card-meta">
+              <span>${bossCount} BOSS${bossCount !== 1 ? "ES" : ""}</span>
+              <span class="sector-card-status">${statusLabel}</span>
+              <span>${sectorEnslaved}/${sectorTotal}</span>
+              <span class="sector-card-chevron">&#x25BC;</span>
+            </div>
+          </div>
+        </div>
+      </div>`;
+
+    // Expand panel (separate grid sibling, spans full width when visible)
+    bossHtml += `
+      <div class="sector-expand" id="expand-${sectorId}">
+        <div class="sector-expand-inner">
+          <div class="sector-expand-header">
+            <span class="sector-expand-name">${sector.toUpperCase()}</span>
+            <span class="sector-expand-summary">${sectorEnslaved}/${sectorTotal} ENSLAVED</span>
+            <a class="sector-detail-link" href="/sector/${encodeURIComponent(sector)}">FULL REPORT &rarr;</a>
+          </div>
+          <div class="sector-bosses">${sectorBossHtml}</div>
+        </div>
+      </div>`;
   }
 
-  // -- SURVIVAL GATE (replaces Ring of Guardians) --
-  let survivalRingHtml = "";
+  // -- SURVIVAL MODE HEADER + GUARDIAN STATUS --
   let survivalModeHeaderHtml = "";
   const survivalBosses = [];
   for (const row of sectors) {
@@ -1230,7 +1291,7 @@ function processAllData(html, data, activeQuestKeys) {
       }
       const glowRadius = f > 0 ? Math.round(2 + f * 4) : 0;
       const glow = glowRadius > 0 ? `filter="drop-shadow(0 0 ${glowRadius}px ${color})"` : "";
-      return `<svg width="16" height="14" viewBox="0 0 10 9" shape-rendering="crispEdges" ${glow}>
+      return `<svg width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" ${glow}>
         <rect x="1" y="0" width="3" height="1" fill="${color}"/>
         <rect x="6" y="0" width="3" height="1" fill="${color}"/>
         <rect x="0" y="1" width="10" height="1" fill="${color}"/>
@@ -1252,88 +1313,30 @@ function processAllData(html, data, activeQuestKeys) {
       heartsHtml += `<span class="guardian-heart" title="${escHtml(sb.bossName)} (${bData.enslaved}/${bData.total})">${heartSvg(fraction, allGuardiansComplete)}</span>`;
     }
 
-    // Mode banner + hearts — goes under confidence bar
+    // Inline heart SVG for guardian text
+    const inlineHeart = `<svg class="guardian-inline-heart" width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
+
+    const guardianLinkText = allGuardiansComplete
+      ? `SURVIVAL UNLOCKED`
+      : `${guardiansDefeated}/${survivalBosses.length} GUARDIANS DEFEATED &mdash; ${overallPct}% ENSLAVED`;
+
+    // Mode banner + guardian link + hearts — stacked under confidence bar
     survivalModeHeaderHtml = allGuardiansComplete
       ? `<div class="mode-header mode-header-achieved">
-           <div class="mode-banner-line"><span class="mode-banner mode-survival">GAME MODE: SURVIVAL</span><span class="hearts-row">${heartsHtml}</span></div>
+           <div class="mode-banner mode-survival">GAME MODE: SURVIVAL</div>
            <div class="mode-subtitle mode-achieved">READY FOR THE REAL WORLD</div>
+           <a href="/guardians" class="guardian-status-link achieved">${guardianLinkText}</a>
+           <div class="hearts-row">${heartsHtml}</div>
          </div>`
       : `<div class="mode-header">
-           <div class="mode-banner-line"><span class="mode-banner mode-creative">GAME MODE: CREATIVE</span><span class="hearts-row">${heartsHtml}</span></div>
-           <div class="mode-subtitle">ENSLAVE ALL GUARDIANS TO ENTER SURVIVAL MODE</div>
+           <div class="mode-banner mode-creative">GAME MODE: CREATIVE</div>
+           <div class="mode-subtitle">ENSLAVE ALL ${inlineHeart}GUARDIANS${inlineHeart} TO ENTER SURVIVAL MODE</div>
+           <a href="/guardians" class="guardian-status-link">${guardianLinkText}</a>
+           <div class="hearts-row">${heartsHtml}</div>
          </div>`;
 
-    // Compact survival gate graphic — links to guardians page
-    const gateColor = allGuardiansComplete ? "#ffd700" : "#ffea00";
-    const gateStatus = allGuardiansComplete ? "SURVIVAL UNLOCKED" : `${guardiansDefeated}/${survivalBosses.length} GUARDIANS DEFEATED`;
-    const gatePct = `${overallPct}% MINIONS ENSLAVED`;
-
-    survivalRingHtml = `
-      <a href="/guardians" class="survival-gate${allGuardiansComplete ? ' survival-gate-achieved' : ''}">
-        <div class="survival-gate-icon">
-          <svg width="28" height="28" viewBox="0 0 20 20">
-            <polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5" filter="url(#gateStarGlow)"/>
-            <defs><filter id="gateStarGlow"><feGaussianBlur stdDeviation="1.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>
-          </svg>
-        </div>
-        <div class="survival-gate-text">
-          <div class="survival-gate-title" style="color:${gateColor};">${gateStatus}</div>
-          <div class="survival-gate-sub">${gatePct}</div>
-        </div>
-      </a>`;
   }
 
-  // -- BOSS CONQUEST RANKINGS (bosses with remaining minions) --
-  const incompleteBosses = [];
-  for (const sector in bossMap) {
-    for (const bossName in bossMap[sector]) {
-      const stats = bossMap[sector][bossName];
-      const remaining = stats.total - stats.enslaved;
-      if (remaining > 0) {
-        incompleteBosses.push({
-          sector, bossName, ...stats,
-          remaining,
-          pct: stats.total > 0 ? (stats.enslaved / stats.total) * 100 : 0,
-        });
-      }
-    }
-  }
-  // Sort: highest completion % first, then fewest remaining, then alphabetical
-  incompleteBosses.sort((a, b) => {
-    if (b.pct !== a.pct) return b.pct - a.pct;
-    if (a.remaining !== b.remaining) return a.remaining - b.remaining;
-    return a.bossName.localeCompare(b.bossName);
-  });
-
-  let rankHtml = "";
-  incompleteBosses.slice(0, 10).forEach((boss, i) => {
-    // Color gradient: gold for nearly complete → cyan for just started
-    const t = incompleteBosses.length > 1 ? i / (incompleteBosses.length - 1) : 0;
-    const r = Math.round(255 - t * 255 + t * 0);
-    const g = Math.round(215 - t * 215 + t * 242);
-    const b = Math.round(0 + t * 255);
-    const color = `rgb(${r},${g},${b})`;
-
-    const statusLabel = boss.pct >= 75 ? "NEARLY CONQUERED"
-      : boss.pct >= 50 ? "HALFWAY THERE"
-      : boss.pct > 0 ? "IN PROGRESS"
-      : "NOT STARTED";
-
-    const encodedBoss = encodeURIComponent(boss.bossName);
-    const encodedSector = encodeURIComponent(boss.sector);
-
-    rankHtml += `
-      <a class="rank-entry" href="/boss/${encodedBoss}?sector=${encodedSector}" style="text-decoration:none;color:inherit;">
-        <span class="rank-badge" style="color:${color}">#${i + 1}</span>
-        <span class="rank-boss" style="color:${color}">${escHtml(boss.bossName)}</span>
-        <div class="rank-bar-wrap">
-          <div class="rank-bar" style="width:${boss.pct.toFixed(1)}%; background:${color};"></div>
-          <span class="rank-info">${boss.enslaved}/${boss.total} ENSLAVED &mdash; ${boss.remaining} REMAINING</span>
-        </div>
-        <span class="rank-sector">${escHtml(boss.sector)}</span>
-        <span class="rank-status-label" style="color:${color}">${statusLabel}</span>
-      </a>`;
-  });
 
   // -- TIER LIST (5 metals, sub-rank shown only on active) --
   const metals = [
@@ -1402,8 +1405,6 @@ function processAllData(html, data, activeQuestKeys) {
     .split("[[MAIN_RADAR]]").join(mainRadar)
     .split("[[TIER_LIST]]").join(tierListHtml)
     .split("[[BOSS_LIST]]").join(bossHtml)
-    .split("[[POWER_RANKINGS]]").join(rankHtml)
-    .split("[[SURVIVAL_RING]]").join(survivalRingHtml)
     .split("[[SURVIVAL_MODE_HEADER]]").join(survivalModeHeaderHtml);
 }
 
@@ -1672,65 +1673,189 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         text-shadow: 0 0 10px rgba(0, 242, 255, 0.5);
     }
     #bosses {
-        columns: 2;
-        column-gap: 20px;
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        grid-auto-flow: dense;
+        gap: 14px;
     }
-    .sector-zone {
-        border: 1px solid rgba(0, 242, 255, 0.3);
-        background: rgba(0, 242, 255, 0.03);
-        border-radius: 8px;
-        padding: 20px 12px 12px 12px;
+
+    /* Sector summary cards */
+    .sector-card {
         position: relative;
+        padding: 2px;
+        background: linear-gradient(135deg, #ff00ff, #00f2ff);
+        cursor: pointer;
+        transition: box-shadow 0.3s, transform 0.15s;
+    }
+    .sector-card::before {
+        content: "";
+        position: absolute;
+        inset: 2px;
+        background: #0a0b10;
+        z-index: 0;
+    }
+    .sector-card:hover {
+        box-shadow: 0 0 20px rgba(255, 0, 255, 0.25), 0 0 20px rgba(0, 242, 255, 0.15);
+        transform: translateY(-1px);
+    }
+    .sector-card.active {
+        box-shadow: 0 0 25px rgba(255, 0, 255, 0.4), 0 0 25px rgba(0, 242, 255, 0.25);
+    }
+    .sector-card.active .sector-card-chevron {
+        transform: rotate(180deg);
+    }
+    /* Corner accents */
+    .sector-card::after {
+        content: "";
+        position: absolute;
+        top: 6px; left: 6px;
+        width: 12px; height: 12px;
+        border-top: 2px solid #ff00ff;
+        border-left: 2px solid #ff00ff;
+        z-index: 2;
+        pointer-events: none;
+    }
+    .sector-card-layout {
+        position: relative;
+        z-index: 1;
         display: flex;
-        flex-direction: column;
         align-items: center;
         gap: 8px;
-        break-inside: avoid;
-        margin-bottom: 20px;
+        padding: 10px 12px;
     }
-    .sector-zone::before {
-        content: attr(data-sector);
-        position: absolute;
-        top: -12px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: #0a0b10;
-        padding: 2px 15px;
-        font-size: 0.85em;
-        color: #ff00ff;
-        border: 1px solid #ff00ff;
-        letter-spacing: 2px;
-        white-space: nowrap;
-        z-index: 10;
-        box-shadow: 0 0 8px rgba(255, 0, 255, 0.4);
-        pointer-events: none;
-        visibility: hidden;
+    .sector-card-radar {
+        flex-shrink: 0;
+        opacity: 0.8;
     }
-    .sector-link {
-        position: absolute;
-        top: -12px;
-        left: 50%;
-        transform: translateX(-50%);
-        background: #0a0b10;
-        padding: 2px 15px;
+    .sector-card-radar svg {
+        display: block;
+        width: 100px;
+        height: 100px;
+    }
+    .sector-card-info {
+        flex: 1;
+        min-width: 0;
+        text-align: left;
+    }
+    .sector-card-top {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        gap: 6px;
+        margin-bottom: 2px;
+    }
+    .sector-card-name {
         font-size: 0.85em;
+        font-weight: bold;
         color: #ff00ff;
-        border: 1px solid #ff00ff;
-        letter-spacing: 2px;
+        letter-spacing: 3px;
+        text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
         white-space: nowrap;
-        z-index: 11;
-        box-shadow: 0 0 8px rgba(255, 0, 255, 0.4);
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .sector-card-pct {
+        font-size: 1em;
+        font-weight: bold;
+        color: #00ff9d;
+        text-shadow: 0 0 6px rgba(0, 255, 157, 0.4);
+        flex-shrink: 0;
+    }
+    .sector-card-desc {
+        font-size: 0.6em;
+        color: #aaa;
+        margin-bottom: 1px;
+        text-transform: none;
+        line-height: 1.3;
+    }
+    .sector-card-sub {
+        font-size: 0.55em;
+        color: #00f2ff;
+        letter-spacing: 1px;
+        margin-bottom: 6px;
+    }
+    .sector-card-bar-wrap {
+        width: 100%;
+        height: 3px;
+        background: #1a1d26;
+        border-radius: 2px;
+        overflow: hidden;
+        margin-bottom: 4px;
+    }
+    .sector-card-bar {
+        height: 100%;
+        background: linear-gradient(90deg, #ff00ff, #00f2ff);
+        border-radius: 2px;
+        transition: width 0.5s ease;
+    }
+    .sector-card-meta {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.55em;
+        color: #666;
+        letter-spacing: 1px;
+    }
+    .sector-card-status {
+        color: #ff8800;
+        letter-spacing: 2px;
+    }
+    .sector-card-chevron {
+        color: #ff00ff;
+        transition: transform 0.3s;
+        display: inline-block;
+    }
+
+    /* Expand panel — full-width row below the card's grid row */
+    .sector-expand {
+        grid-column: 1 / -1;
+        display: none;
+    }
+    .sector-expand.open {
+        display: block;
+    }
+    .sector-expand-inner {
+        border: 1px solid rgba(255, 0, 255, 0.3);
+        border-top: 2px solid #ff00ff;
+        background: rgba(255, 0, 255, 0.03);
+        padding: 16px;
+        text-align: center;
+        animation: expandFade 0.3s ease;
+    }
+    @keyframes expandFade {
+        from { opacity: 0; transform: translateY(-8px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .sector-expand-header {
+        display: flex;
+        align-items: baseline;
+        justify-content: center;
+        gap: 16px;
+        margin-bottom: 14px;
+        padding-bottom: 8px;
+        border-bottom: 1px solid rgba(255, 0, 255, 0.15);
+    }
+    .sector-expand-name {
+        font-size: 1em;
+        font-weight: bold;
+        color: #ff00ff;
+        letter-spacing: 3px;
+        text-shadow: 0 0 8px rgba(255, 0, 255, 0.5);
+    }
+    .sector-expand-summary {
+        font-size: 0.65em;
+        color: #666;
+        letter-spacing: 1px;
+    }
+    .sector-detail-link {
+        font-size: 0.65em;
+        color: #ff00ff;
+        letter-spacing: 2px;
         text-decoration: none;
-        cursor: pointer;
-        transition: all 0.2s;
+        transition: color 0.2s;
     }
-    .sector-link:hover {
-        background: #ff00ff;
-        color: #0a0b10;
-        box-shadow: 0 0 16px rgba(255, 0, 255, 0.8);
-    }
-    .sector-radar {
-        margin-bottom: 5px;
+    .sector-detail-link:hover {
+        color: #fff;
+        text-shadow: 0 0 8px #ff00ff;
     }
     .sector-bosses {
         display: flex;
@@ -1774,13 +1899,13 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         max-width: 80px;
     }
     .boss-guardian .boss-pie {
-        box-shadow: 0 0 10px rgba(255,234,0,0.3), 0 0 20px rgba(255,234,0,0.1);
+        box-shadow: 0 0 10px rgba(255,68,68,0.3), 0 0 20px rgba(255,68,68,0.1);
     }
     .boss-guardian .boss-ring-wrap:hover .boss-pie {
-        box-shadow: 0 0 18px rgba(255,234,0,0.5), 0 0 30px rgba(255,234,0,0.2);
+        box-shadow: 0 0 18px rgba(255,68,68,0.5), 0 0 30px rgba(255,68,68,0.2);
     }
-    .boss-guardian .boss-label { color: #ffea00; }
-    .boss-guardian-star {
+    .boss-guardian .boss-label { color: #ff4444; }
+    .boss-guardian-heart {
         position: absolute;
         top: 50%;
         left: 50%;
@@ -1797,100 +1922,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     .key-item { display: flex; align-items: center; gap: 6px; }
     .key-swatch { display: inline-block; width: 12px; height: 12px; border-radius: 50%; }
 
-    /* Power Rankings */
-    .power-rankings {
-        margin-top: 10px;
-        padding: 15px 10px 20px 10px;
-    }
-    .power-rankings h1 {
-        font-size: 1.4em;
-        color: #ffd700;
-        text-shadow: 2px 2px #ff00ff;
-        border-bottom: none !important;
-        margin-bottom: 15px;
-    }
-    .rank-entry {
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        margin-bottom: 8px;
-        font-size: 0.8em;
-    }
-    .rank-badge {
-        font-weight: bold;
-        width: 30px;
-        text-align: right;
-        flex-shrink: 0;
-    }
-    .rank-bar-wrap {
-        flex: 1;
-        background: #1a1d26;
-        border: 1px solid #333;
-        height: 22px;
-        position: relative;
-        overflow: hidden;
-    }
-    .rank-bar {
-        height: 100%;
-        opacity: 0.7;
-        transition: width 0.5s ease-in-out;
-    }
-    .rank-info {
-        position: absolute;
-        top: 2px;
-        left: 8px;
-        font-size: 0.85em;
-        color: #fff;
-        text-shadow: 1px 1px 2px #000;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        max-width: calc(100% - 16px);
-    }
-    .rank-boss {
-        color: #ccc;
-        font-size: 0.85em;
-        font-weight: bold;
-        width: 110px;
-        flex-shrink: 0;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .rank-sector {
-        width: 80px;
-        text-align: center;
-        font-size: 0.7em;
-        color: #666;
-        flex-shrink: 0;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .rank-status-label {
-        width: 120px;
-        text-align: right;
-        font-size: 0.7em;
-        font-weight: bold;
-        letter-spacing: 1px;
-        flex-shrink: 0;
-    }
-    .rank-subtitle {
-        text-align: center;
-        font-size: 0.65em;
-        color: #ff6644;
-        letter-spacing: 2px;
-        margin-bottom: 15px;
-        text-shadow: 0 0 6px rgba(255, 102, 68, 0.3);
-    }
-    a.rank-entry {
-        transition: background 0.2s;
-        padding: 2px 4px;
-        border-radius: 3px;
-    }
-    a.rank-entry:hover {
-        background: rgba(255, 255, 255, 0.05);
-    }
 
     /* Side navigation panel */
     .side-nav {
@@ -1930,22 +1961,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     .nav-user { color: #555; border-color: #333; box-shadow: none; font-size: 0.6em !important; letter-spacing: 1px !important; padding: 5px 10px !important; margin-top: 4px; }
     .nav-user:hover { border-color: #888; color: #888; background: transparent; }
 
-    /* Quest UI */
-    .quest-badge-link { text-decoration: none; }
-    .quest-badge {
-        display: inline-block;
-        background: #ff6600;
-        color: #0a0b10;
-        font-size: 0.45em;
-        padding: 3px 10px;
-        vertical-align: middle;
-        margin-left: 10px;
-        letter-spacing: 1px;
-        font-weight: bold;
-        animation: pulse 2s infinite;
-    }
-    .quest-badge.dim { background: #333; color: #666; animation: none; }
-
     @keyframes pulse { 0% { opacity: 1; } 50% { opacity: 0.7; } 100% { opacity: 1; } }
     .glitch { font-size: 0.7em; color: #555; margin-top: 20px; text-align: center; line-height: 1.6; }
 
@@ -1965,18 +1980,12 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     .mode-header-achieved {
         border-bottom-color: rgba(255, 215, 0, 0.3);
     }
-    .mode-banner-line {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 10px;
-        flex-wrap: wrap;
-        margin-bottom: 4px;
-    }
     .mode-banner {
         font-size: 0.95em;
         font-weight: bold;
         letter-spacing: 3px;
+        text-align: center;
+        margin-bottom: 4px;
     }
     .mode-creative {
         color: #00f2ff;
@@ -2000,10 +2009,12 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         text-shadow: 0 0 8px rgba(255, 215, 0, 0.4);
     }
     .hearts-row {
-        display: inline-flex;
+        display: flex;
+        justify-content: center;
         align-items: center;
-        gap: 6px;
-        flex-wrap: wrap;
+        gap: 4px;
+        margin-top: 6px;
+        flex-wrap: nowrap;
     }
     .guardian-heart {
         cursor: help;
@@ -2012,48 +2023,28 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     .guardian-heart:hover {
         transform: scale(1.3);
     }
-    /* Survival Gate — compact link to guardians page */
-    .survival-gate {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        gap: 12px;
-        padding: 10px 20px;
-        margin: 10px auto;
-        max-width: 360px;
-        border: 1px solid rgba(255,234,0,0.25);
-        background: rgba(255,234,0,0.03);
-        text-decoration: none;
-        transition: all 0.2s;
+    /* Guardian status link — inline under mode subtitle */
+    .guardian-inline-heart {
+        vertical-align: middle;
+        margin: 0 2px;
     }
-    .survival-gate:hover {
-        border-color: rgba(255,234,0,0.5);
-        background: rgba(255,234,0,0.06);
-        box-shadow: 0 0 15px rgba(255,234,0,0.15);
-    }
-    .survival-gate-achieved {
-        border-color: rgba(255,215,0,0.4);
-        background: rgba(255,215,0,0.05);
-    }
-    .survival-gate-achieved:hover {
-        border-color: rgba(255,215,0,0.6);
-        background: rgba(255,215,0,0.08);
-        box-shadow: 0 0 15px rgba(255,215,0,0.2);
-    }
-    .survival-gate-icon { flex-shrink: 0; }
-    .survival-gate-title {
-        font-size: 0.75em;
-        font-weight: bold;
-        letter-spacing: 2px;
-        font-family: 'Courier New', monospace;
-        text-transform: uppercase;
-    }
-    .survival-gate-sub {
+    .guardian-status-link {
+        display: block;
+        text-align: center;
         font-size: 0.6em;
-        color: #666;
-        letter-spacing: 1px;
-        font-family: 'Courier New', monospace;
-        text-transform: uppercase;
+        color: #ffea00;
+        letter-spacing: 2px;
+        text-decoration: none;
+        margin-top: 4px;
+        transition: color 0.2s, text-shadow 0.2s;
+    }
+    .guardian-status-link:hover {
+        color: #fff;
+        text-shadow: 0 0 8px rgba(255, 234, 0, 0.6);
+    }
+    .guardian-status-link.achieved {
+        color: #ffd700;
+        text-shadow: 0 0 6px rgba(255, 215, 0, 0.4);
     }
 
     @media (max-width: 600px) {
@@ -2067,7 +2058,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         .title-main span { font-size: 1.2em; letter-spacing: 3px; }
         .title-tagline { font-size: 0.75em; letter-spacing: 3px; }
         .stat-grid { grid-template-columns: 1fr; }
-        #bosses { columns: 1; }
+        #bosses { grid-template-columns: 1fr; }
         .guardian-ring { gap: 15px; }
         .guardian-orb { width: 65px; }
         .guardian-orb-circle { width: 40px; height: 40px; }
@@ -2228,8 +2219,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             </div>
         </div>
 
-        [[SURVIVAL_RING]]
-
         [[RECENT_ENSLAVED]]
 
         <div class="sector-map">
@@ -2240,19 +2229,6 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
                 <span class="key-item"><span class="key-swatch" style="background:#2a2d36; border: 1px solid #555;"></span> Locked</span>
             </div>
             <div id="bosses">[[BOSS_LIST]]</div>
-        </div>
-
-        <div class="power-rankings">
-            <h1>Boss Conquest [[QUEST_BADGE]]</h1>
-            <div class="rank-subtitle">BOSSES WITH MINIONS REMAINING &mdash; CONQUER THEM ALL</div>
-            <div class="rank-entry rank-header">
-                <span class="rank-badge"></span>
-                <span class="rank-boss" style="color:#aaa;">BOSS</span>
-                <div class="rank-bar-wrap" style="background:none;border:none;"></div>
-                <span class="rank-sector" style="color:#aaa;">SECTOR</span>
-                <span class="rank-status-label" style="color:#aaa;">STATUS</span>
-            </div>
-            [[POWER_RANKINGS]]
         </div>
 
         <div class="glitch">
@@ -2271,6 +2247,25 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         [[ADMIN_NAV]]
         <a href="/login" class="nav-user">[[USER_NAV]]</a>
     </nav>
+<script>
+function toggleSector(sectorId) {
+  var panel = document.getElementById('expand-' + sectorId);
+  var card = document.querySelector('.sector-card[data-sector="' + sectorId + '"]');
+  var isOpen = panel.classList.contains('open');
+
+  // Close all panels and deselect all cards
+  document.querySelectorAll('.sector-expand.open').forEach(function(p) { p.classList.remove('open'); });
+  document.querySelectorAll('.sector-card.active').forEach(function(c) { c.classList.remove('active'); });
+
+  // If it wasn't open, open this one
+  if (!isOpen) {
+    panel.classList.add('open');
+    card.classList.add('active');
+    // Scroll the panel into view after animation starts
+    setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 100);
+  }
+}
+</script>
 </body>
 </html>`;
 
@@ -2281,7 +2276,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
   const survivalBadge = isSurvivalBoss
-    ? `<div class="survival-badge"><svg width="14" height="14" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:3px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg> SURVIVAL MODE GUARDIAN</div>`
+    ? `<div class="survival-badge"><svg width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:3px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg> SURVIVAL MODE GUARDIAN</div>`
     : "";
 
   const recCol = findRecurringCol(minions);
@@ -2298,7 +2293,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
     const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
     let questBtn;
     if (onQuest) {
-      questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
+      questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
     } else if (m["Status"] === "Engaged") {
       questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
     } else {
@@ -2361,7 +2356,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
     }
     .survival-badge {
         text-align: center;
-        color: #ffea00;
+        color: #ff4444;
         font-size: 0.7em;
         letter-spacing: 3px;
         margin-bottom: 5px;
@@ -3122,11 +3117,6 @@ app.get("/", async (req, res) => {
     }
     html = html.split("[[NAV_NOTIFICATIONS]]").join(navNotifications);
 
-    const questBadgeHtml = activeQuestCount > 0
-      ? `<a href="/quests" class="quest-badge-link"><span class="quest-badge">${activeQuestCount} ACTIVE</span></a>`
-      : `<a href="/quests" class="quest-badge-link"><span class="quest-badge dim">QUEST BOARD</span></a>`;
-    html = html.split("[[QUEST_BADGE]]").join(questBadgeHtml);
-
     // Army count (Enslaved minions)
     html = html.split("[[ARMY_LINK]]").join(`&#x2694; HENRY'S ARMY`);
 
@@ -3219,7 +3209,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
   const survivalSet = survivalBossNames || new Set();
-  const starSvg = `<svg width="14" height="14" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:3px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg>`;
+  const heartSvgIcon = `<svg width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:3px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
 
   const recCol = bosses.length > 0 && bosses[0].minions.length > 0 ? findRecurringCol(bosses[0].minions) : null;
   let bossBlocks = "";
@@ -3237,7 +3227,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
       const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
       let questBtn;
       if (onQuest) {
-        questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
+        questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
       } else if (m["Status"] === "Engaged") {
         questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sectorName)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
       } else {
@@ -3265,7 +3255,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
     const isSurvival = survivalSet.has(bossName);
     bossBlocks += `
       <div class="boss-block${isSurvival ? ' survival-boss' : ''}">
-        <h2><a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sectorName)}" class="boss-link">${isSurvival ? starSvg + ' ' : ''}${escHtml(bossName)}</a>${isSurvival ? '<span class="survival-tag">GUARDIAN</span>' : ''}</h2>
+        <h2><a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sectorName)}" class="boss-link">${isSurvival ? heartSvgIcon + ' ' : ''}${escHtml(bossName)}</a>${isSurvival ? '<span class="survival-tag">GUARDIAN</span>' : ''}</h2>
         <table>
           <thead>
             <tr><th></th><th>Minion</th><th>Status</th><th>INT</th><th>STA</th><th>TMP</th><th>REP</th><th>IMP</th><th>TOTAL</th></tr>
@@ -3296,13 +3286,13 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
     .sector-tag { text-align: center; font-size: 0.7em; color: #888; letter-spacing: 3px; margin-bottom: 30px; }
     .boss-block { margin-bottom: 35px; }
     .boss-block h2 { color: #ff6600; font-size: 1em; letter-spacing: 3px; margin-bottom: 8px; text-shadow: 0 0 8px rgba(255,102,0,0.3); }
-    .boss-block.survival-boss { border-left: 3px solid rgba(255, 234, 0, 0.4); padding-left: 12px; }
+    .boss-block.survival-boss { border-left: 3px solid rgba(255, 68, 68, 0.4); padding-left: 12px; }
     .boss-link { color: #ff6600; text-decoration: none; }
     .boss-link:hover { text-decoration: underline; color: #ffea00; }
     .survival-tag {
-        font-size: 0.6em; color: #ffea00; letter-spacing: 2px; margin-left: 10px;
-        border: 1px solid rgba(255, 234, 0, 0.4); padding: 2px 6px; vertical-align: middle;
-        text-shadow: 0 0 6px rgba(255, 234, 0, 0.3);
+        font-size: 0.6em; color: #ff4444; letter-spacing: 2px; margin-left: 10px;
+        border: 1px solid rgba(255, 68, 68, 0.4); padding: 2px 6px; vertical-align: middle;
+        text-shadow: 0 0 6px rgba(255, 68, 68, 0.3);
     }
     table { width: 100%; border-collapse: collapse; font-size: 0.8em; margin-bottom: 10px; }
     th { padding: 8px; text-align: left; border-bottom: 2px solid #00f2ff; }
@@ -3467,7 +3457,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
   const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
 
-  const starSvg = `<svg width="14" height="14" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:3px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg>`;
+  const heartSvgIcon = `<svg width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:3px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
 
   const recCol = bosses.length > 0 && bosses[0].minions.length > 0 ? findRecurringCol(bosses[0].minions) : null;
   let bossBlocks = "";
@@ -3485,7 +3475,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
       const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
       let questBtn;
       if (onQuest) {
-        questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
+        questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
       } else if (m["Status"] === "Engaged") {
         questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
       } else {
@@ -3515,7 +3505,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
       <div class="boss-block">
         <h2>
           <a href="/boss/${encodeURIComponent(bossName)}?sector=${encodeURIComponent(sector)}" class="boss-link">
-            ${starSvg} ${escHtml(bossName)}
+            ${heartSvgIcon} ${escHtml(bossName)}
           </a>
           <span class="boss-sector-tag">${escHtml(sector)}</span>
           <span class="boss-pct" style="color:${pctColor};">${pct}%</span>
@@ -3782,50 +3772,149 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         font-size: 0.85em;
         color: #ff6600;
     }
-    .quest-card {
-        border: 1px solid rgba(0, 242, 255, 0.3);
-        background: rgba(0, 242, 255, 0.03);
-        border-radius: 6px;
-        padding: 15px;
-        margin-bottom: 15px;
-        transition: border-color 0.2s;
+
+    /* Compact quest card grid */
+    .qc-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        grid-auto-flow: dense;
+        gap: 8px;
     }
-    .quest-card:hover { border-color: #00f2ff; }
-    .quest-card[data-status="Approved"] { border-color: rgba(0, 255, 157, 0.3); opacity: 0.7; }
-    .quest-card[data-status="Rejected"] { border-color: rgba(255, 0, 68, 0.5); }
-    .quest-card[data-status="Abandoned"] { border-color: rgba(85, 85, 85, 0.3); opacity: 0.4; }
-    .quest-header {
+    .qc-card {
+        border: 1px solid rgba(0, 242, 255, 0.25);
+        background: rgba(0, 242, 255, 0.03);
+        padding: 8px 10px;
+        cursor: pointer;
+        transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+    }
+    .qc-card:hover {
+        border-color: rgba(0, 242, 255, 0.6);
+        box-shadow: 0 0 10px rgba(0, 242, 255, 0.15);
+        transform: translateY(-1px);
+    }
+    .qc-card.active {
+        border-color: #00f2ff;
+        box-shadow: 0 0 15px rgba(0, 242, 255, 0.3);
+    }
+    .qc-card-overdue {
+        border-color: rgba(255, 0, 68, 0.5);
+        background: rgba(255, 0, 68, 0.04);
+    }
+    .qc-card-overdue:hover { border-color: #ff0044; box-shadow: 0 0 10px rgba(255,0,68,0.2); }
+    .qc-summary {
         display: flex;
         justify-content: space-between;
-        margin-bottom: 10px;
-        font-size: 0.75em;
+        align-items: center;
+        gap: 8px;
     }
-    .quest-id { color: #555; }
-    .quest-status { font-weight: bold; letter-spacing: 2px; }
-    .quest-body { margin-bottom: 12px; }
-    .quest-target { font-size: 1.1em; margin-bottom: 5px; }
-    .quest-boss { color: #888; }
-    .quest-arrow { color: #ff00ff; margin: 0 8px; }
-    .quest-minion { color: #00f2ff; font-weight: bold; }
+    .qc-left {
+        min-width: 0;
+        overflow: hidden;
+    }
+    .qc-minion {
+        display: block;
+        font-size: 0.75em;
+        font-weight: bold;
+        color: #00f2ff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .qc-boss {
+        display: block;
+        font-size: 0.55em;
+        color: #666;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .qc-right {
+        flex-shrink: 0;
+        text-align: right;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .qc-status {
+        font-size: 0.6em;
+        font-weight: bold;
+        letter-spacing: 1px;
+    }
+    .qc-due {
+        font-size: 0.5em;
+        color: #ff8800;
+        letter-spacing: 1px;
+    }
+    .qc-overdue {
+        color: #ff0044;
+        font-weight: bold;
+        animation: overdue-pulse 2s ease-in-out infinite;
+    }
+    @keyframes overdue-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
+    .qc-reject-badge {
+        display: inline-block;
+        width: 16px; height: 16px;
+        background: #ff0044;
+        color: #fff;
+        font-size: 0.6em;
+        font-weight: bold;
+        text-align: center;
+        line-height: 16px;
+        border-radius: 50%;
+        flex-shrink: 0;
+    }
+
+    /* Expand panel — full width below row */
+    .qc-expand {
+        grid-column: 1 / -1;
+        display: none;
+    }
+    .qc-expand.open { display: block; }
+    .qc-expand-inner {
+        border: 1px solid rgba(0, 242, 255, 0.3);
+        border-top: 2px solid #00f2ff;
+        background: rgba(0, 242, 255, 0.03);
+        padding: 14px;
+        animation: qcFade 0.3s ease;
+    }
+    @keyframes qcFade {
+        from { opacity: 0; transform: translateY(-6px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .qc-expand-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 8px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(0, 242, 255, 0.15);
+    }
+    .qc-expand-name {
+        font-size: 0.9em;
+        font-weight: bold;
+        color: #00f2ff;
+        letter-spacing: 2px;
+    }
+    .qc-id { font-size: 0.65em; color: #555; }
+    .qc-reject-reason {
+        font-size: 0.75em; color: #ff0044; margin-bottom: 6px;
+        text-transform: none; letter-spacing: 0.5px;
+        padding: 4px 8px;
+        background: rgba(255,0,68,0.06);
+        border-left: 2px solid #ff0044;
+    }
     .quest-sector { font-size: 0.75em; color: #ff00ff; margin-bottom: 4px; }
     .quest-subject { font-size: 0.75em; color: #ff00ff; margin-bottom: 8px; }
-    .quest-due { font-size: 0.7em; color: #ff8800; letter-spacing: 1px; display: block; margin-top: 2px; }
-    .quest-overdue { color: #ff0044; font-weight: bold; animation: overdue-pulse 2s ease-in-out infinite; }
-    @keyframes overdue-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
-    .quest-card.overdue { border-color: rgba(255, 0, 68, 0.6); background: rgba(255, 0, 68, 0.06); box-shadow: 0 0 8px rgba(255, 0, 68, 0.2); }
     .quest-suggestion {
         font-size: 0.8em;
         color: #ccc;
         border-left: 2px solid #ff00ff;
         padding-left: 10px;
         margin-top: 8px;
+        margin-bottom: 10px;
         text-transform: none;
     }
-    .quest-task-label {
-        color: #ff00ff;
-        font-weight: bold;
-        letter-spacing: 1px;
-    }
+    .quest-task-label { color: #ff00ff; font-weight: bold; letter-spacing: 1px; }
     .quest-proof-type { color: #ffea00; margin-right: 5px; }
     .quest-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
     .quest-submit-form { display: flex; gap: 8px; flex: 1; align-items: center; }
@@ -3864,40 +3953,26 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         transition: all 0.2s;
     }
     .quest-submit-btn:hover:not(:disabled) { background: #00ff9d; color: #0a0b10; }
-    .quest-submit-btn:disabled {
-        border-color: #444;
-        color: #555;
-        cursor: not-allowed;
-        opacity: 0.5;
-    }
+    .quest-submit-btn:disabled { border-color: #444; color: #555; cursor: not-allowed; opacity: 0.5; }
     .quest-abandon-btn {
         background: none;
         border: 1px solid #ff0044;
         color: #ff0044;
-        width: 28px;
-        height: 28px;
-        font-size: 0.8em;
-        font-weight: bold;
+        width: 28px; height: 28px;
+        font-size: 0.8em; font-weight: bold;
         cursor: pointer;
         font-family: 'Courier New', monospace;
         transition: all 0.2s;
-        padding: 0;
-        flex-shrink: 0;
+        padding: 0; flex-shrink: 0;
     }
     .quest-abandon-btn:hover { background: #ff0044; color: #0a0b10; box-shadow: 0 0 8px rgba(255, 0, 68, 0.5); }
     .quest-date { font-size: 0.7em; color: #555; }
-    .quest-status-col { text-align: right; }
-    .quest-reject-reason {
-        font-size: 0.75em; color: #ff0044; margin-top: 2px;
-        text-transform: none; letter-spacing: 0.5px;
-    }
-    .quest-feedback { font-size: 0.8em; color: #ffea00; border-left: 2px solid #ffea00; padding: 6px 10px; margin-top: 6px; text-transform: none; background: rgba(255,234,0,0.05); }
-    .quest-feedback-label { color: #ff8800; font-weight: bold; text-transform: uppercase; }
     .quest-proof-link { font-size: 0.75em; color: #555; text-transform: none; }
     .no-quests { text-align: center; color: #555; padding: 40px; font-size: 0.9em; }
     @media (max-width: 600px) {
         body { padding: 10px; }
         .hud-container { padding: 15px; }
+        .qc-grid { grid-template-columns: 1fr; }
         .quest-submit-form { flex-direction: column; }
     }
     </style>
@@ -3910,15 +3985,29 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         </div>
         <h1>Quest Board</h1>
         <div class="quest-stats">${activeCount} ACTIVE / ${totalCount} TOTAL QUESTS</div>
-        ${questRows || '<div class="no-quests">NO QUESTS YET. START ONE FROM POWER RANKINGS.</div>'}
+        <div class="qc-grid">
+        ${questRows || '<div class="no-quests" style="grid-column:1/-1">NO QUESTS YET. ADD SOME FROM THE DEFIANT PAGE.</div>'}
+        </div>
     </div>
     <script>
+    function toggleQuest(qid) {
+        var panel = document.getElementById('qe-' + qid);
+        var card = document.querySelector('.qc-card[data-qid="' + qid + '"]');
+        var isOpen = panel.classList.contains('open');
+        document.querySelectorAll('.qc-expand.open').forEach(function(p) { p.classList.remove('open'); });
+        document.querySelectorAll('.qc-card.active').forEach(function(c) { c.classList.remove('active'); });
+        if (!isOpen) {
+            panel.classList.add('open');
+            card.classList.add('active');
+            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 100);
+        }
+    }
     function confirmAbandon(form) {
         return confirm('Are you sure you want to abandon this quest?');
     }
     (function() {
         document.querySelectorAll('.proof-input').forEach(function(input) {
-            const btn = input.closest('form').querySelector('.quest-submit-btn');
+            var btn = input.closest('form').querySelector('.quest-submit-btn');
             if (!btn) return;
             input.addEventListener('input', function() {
                 btn.disabled = input.value.trim().length === 0;
@@ -4285,7 +4374,7 @@ app.get("/quests", async (req, res) => {
         submitForm = `<form class="quest-submit-form" method="POST" action="/quest/submit">
              <input type="hidden" name="questId" value="${q["Quest ID"]}">
              <select name="artifactType" class="artifact-select"><option value="" disabled${!currentType ? " selected" : ""}>ARTIFACT...</option>${opts}</select>
-             <input type="text" name="proofLink" placeholder="PASTE LINK OR INCLUDE DETAILS..." class="proof-input" required>
+             <input type="text" name="proofLink" placeholder="PASTE LINK OR DETAILS..." class="proof-input" required>
              <button type="submit" class="quest-submit-btn" disabled>SUBMIT</button>
            </form>`;
       } else {
@@ -4297,37 +4386,48 @@ app.get("/quests", async (req, res) => {
 
       const dueDate = q["Due Date"] || "";
       const isOverdue = dueDate && dueDate < today && isActive;
-      const dueDateDisplay = dueDate
-        ? `<span class="quest-due ${isOverdue ? "quest-overdue" : ""}">${isOverdue ? "OVERDUE: " : "DUE: "}${dueDate}</span>`
-        : "";
+      const dueBadge = isOverdue
+        ? `<span class="qc-due qc-overdue">OVERDUE ${dueDate}</span>`
+        : dueDate ? `<span class="qc-due">DUE ${dueDate}</span>` : "";
       const subjectDisplay = q["Subject"] ? `<div class="quest-subject">SUBJECT: ${escHtml(q["Subject"])}</div>` : "";
+      const qid = (q["Quest ID"] || "").replace(/[^A-Z0-9]/gi, "");
+      const rejectBadge = isRejected ? `<span class="qc-reject-badge">!</span>` : "";
 
+      // Compact summary card
       questRows += `
-        <div class="quest-card${isOverdue ? " overdue" : ""}" data-status="${q["Status"]}">
-          <div class="quest-header">
-            <span class="quest-id">${q["Quest ID"]}</span>
-            <div class="quest-status-col">
-              <span class="quest-status" style="color:${sc}">${q["Status"]}</span>
-              ${dueDateDisplay}
-              ${isRejected && q["Feedback"] ? `<div class="quest-reject-reason">REASON: ${escHtml(q["Feedback"])}</div>` : ""}
+        <div class="qc-card${isOverdue ? " qc-card-overdue" : ""}" data-qid="${qid}" onclick="toggleQuest('${qid}')">
+          <div class="qc-summary">
+            <div class="qc-left">
+              <span class="qc-minion">${escHtml(q["Minion"])}</span>
+              <span class="qc-boss">${escHtml(q["Boss"])}</span>
+            </div>
+            <div class="qc-right">
+              ${rejectBadge}
+              <span class="qc-status" style="color:${sc}">${q["Status"]}</span>
+              ${dueBadge}
             </div>
           </div>
-          <div class="quest-body">
-            <div class="quest-target">
-              <span class="quest-boss">${escHtml(q["Boss"])}</span>
-              <span class="quest-arrow">&gt;</span>
-              <span class="quest-minion">${escHtml(q["Minion"])}</span>
+        </div>`;
+
+      // Full-width expand panel below row
+      questRows += `
+        <div class="qc-expand" id="qe-${qid}">
+          <div class="qc-expand-inner">
+            <div class="qc-expand-header">
+              <span class="qc-expand-name">${escHtml(q["Boss"])} &gt; ${escHtml(q["Minion"])}</span>
+              <span class="qc-id">${q["Quest ID"]}</span>
             </div>
             <div class="quest-sector">SECTOR: ${escHtml(q["Sector"])}</div>
             ${subjectDisplay}
+            ${isRejected && q["Feedback"] ? `<div class="qc-reject-reason">REJECTED: ${escHtml(q["Feedback"])}</div>` : ""}
             <div class="quest-suggestion">
-              <span class="quest-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details available."}
+              <span class="quest-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details."}
             </div>
-          </div>
-          <div class="quest-footer">
-            ${submitForm}
-            ${abandonBtn}
-            ${q["Date Completed"] ? '<span class="quest-date">COMPLETED: ' + q["Date Completed"] + "</span>" : ""}
+            <div class="quest-footer">
+              ${submitForm}
+              ${abandonBtn}
+              ${q["Date Completed"] ? '<span class="quest-date">COMPLETED: ' + q["Date Completed"] + "</span>" : ""}
+            </div>
           </div>
         </div>`;
     }
@@ -4394,159 +4494,204 @@ function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
         color: #00f2ff;
     }
     .quest-stats span { color: #ffea00; }
-    .rq-card {
-        border: 1px solid rgba(0, 242, 255, 0.3);
-        background: rgba(0, 242, 255, 0.03);
-        border-radius: 6px;
-        padding: 15px;
-        margin-bottom: 20px;
-        transition: border-color 0.2s;
+
+    /* Compact recurring card grid */
+    .rc-grid {
+        display: grid;
+        grid-template-columns: repeat(2, 1fr);
+        grid-auto-flow: dense;
+        gap: 8px;
     }
-    .rq-card:hover { border-color: #00f2ff; }
-    .rq-header {
+    .rc-card {
+        border: 1px solid rgba(0, 242, 255, 0.25);
+        background: rgba(0, 242, 255, 0.03);
+        padding: 8px 10px;
+        cursor: pointer;
+        transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
+        min-width: 0;
+        overflow: hidden;
+    }
+    .rc-card:hover {
+        border-color: rgba(0, 242, 255, 0.6);
+        box-shadow: 0 0 10px rgba(0, 242, 255, 0.15);
+        transform: translateY(-1px);
+    }
+    .rc-card.active {
+        border-color: #00f2ff;
+        box-shadow: 0 0 15px rgba(0, 242, 255, 0.3);
+    }
+    .rc-card-logged { opacity: 0.5; }
+    .rc-card-logged:hover { opacity: 0.85; }
+    .rc-summary {
         display: flex;
         justify-content: space-between;
-        align-items: flex-start;
-        margin-bottom: 10px;
-        font-size: 0.75em;
+        align-items: center;
+        gap: 8px;
     }
-    .rq-id { color: #555; }
-    .rq-status { color: #ff6600; font-weight: bold; letter-spacing: 2px; }
-    .rq-status.submitted { color: #ffea00; }
-    .rq-status.rejected { color: #ff0044; }
-    .rq-target { font-size: 1.1em; margin-bottom: 5px; }
-    .rq-boss { color: #888; }
-    .rq-arrow { color: #ff00ff; margin: 0 8px; }
-    .rq-minion { color: #00f2ff; font-weight: bold; }
+    .rc-left { min-width: 0; overflow: hidden; }
+    .rc-minion {
+        display: block;
+        font-size: 0.75em;
+        font-weight: bold;
+        color: #00f2ff;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .rc-boss {
+        display: block;
+        font-size: 0.55em;
+        color: #666;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .rc-right {
+        flex-shrink: 0;
+        text-align: right;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+    }
+    .rc-status { font-size: 0.6em; font-weight: bold; letter-spacing: 1px; }
+    .rc-log-count { font-size: 0.5em; color: #555; }
+    .rc-logged-badge { font-size: 0.8em; }
+    .rc-reject-badge {
+        display: inline-block;
+        width: 16px; height: 16px;
+        background: #ff0044;
+        color: #fff;
+        font-size: 0.6em;
+        font-weight: bold;
+        text-align: center;
+        line-height: 16px;
+        border-radius: 50%;
+        flex-shrink: 0;
+    }
+
+    /* Expand panel */
+    .rc-expand {
+        grid-column: 1 / -1;
+        display: none;
+        min-width: 0;
+        overflow: hidden;
+    }
+    .rc-expand.open { display: block; }
+    .rc-expand-inner {
+        border: 1px solid rgba(0, 242, 255, 0.3);
+        border-top: 2px solid #00f2ff;
+        background: rgba(0, 242, 255, 0.03);
+        padding: 14px;
+        animation: rcFade 0.3s ease;
+        overflow: hidden;
+        min-width: 0;
+    }
+    @keyframes rcFade {
+        from { opacity: 0; transform: translateY(-6px); }
+        to { opacity: 1; transform: translateY(0); }
+    }
+    .rc-expand-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 8px;
+        padding-bottom: 6px;
+        border-bottom: 1px solid rgba(0, 242, 255, 0.15);
+    }
+    .rc-expand-name {
+        font-size: 0.9em;
+        font-weight: bold;
+        color: #00f2ff;
+        letter-spacing: 2px;
+    }
+    .rc-id { font-size: 0.65em; color: #555; }
+    .rc-reject-reason {
+        font-size: 0.75em; color: #ff0044; margin-bottom: 6px;
+        text-transform: none;
+        padding: 4px 8px;
+        background: rgba(255,0,68,0.06);
+        border-left: 2px solid #ff0044;
+    }
+    .rc-separator {
+        grid-column: 1 / -1;
+        text-align: center;
+        margin: 10px 0;
+        border-top: 1px solid rgba(0, 255, 157, 0.25);
+        position: relative;
+    }
+    .rc-separator span {
+        background: #0a0b10; color: #00ff9d; font-size: 0.7em;
+        letter-spacing: 2px; padding: 0 12px;
+        position: relative; top: -0.65em;
+    }
+
+    /* Shared recurring expand styles */
     .rq-sector { font-size: 0.75em; color: #ff00ff; margin-bottom: 4px; }
     .rq-subject { font-size: 0.75em; color: #ff00ff; margin-bottom: 8px; }
     .rq-task {
-        font-size: 0.8em;
-        color: #ccc;
+        font-size: 0.8em; color: #ccc;
         border-left: 2px solid #ff00ff;
         padding-left: 10px;
-        margin-top: 8px;
-        margin-bottom: 12px;
+        margin-top: 8px; margin-bottom: 12px;
         text-transform: none;
+        word-wrap: break-word;
+        overflow-wrap: break-word;
     }
     .rq-task-label { color: #ff00ff; font-weight: bold; letter-spacing: 1px; }
-    .rq-due { font-size: 0.7em; color: #ff8800; letter-spacing: 1px; }
-    .rq-overdue { color: #ff0044; font-weight: bold; animation: overdue-pulse 2s ease-in-out infinite; }
-    @keyframes overdue-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.6; } }
     .rq-log-section {
         border-top: 1px solid rgba(0, 242, 255, 0.15);
-        margin-top: 12px;
-        padding-top: 10px;
+        margin-top: 12px; padding-top: 10px;
     }
-    .rq-log-title {
-        font-size: 0.7em;
-        color: #ffea00;
-        letter-spacing: 2px;
-        margin-bottom: 8px;
-    }
+    .rq-log-title { font-size: 0.7em; color: #ffea00; letter-spacing: 2px; margin-bottom: 8px; }
     .rq-log-entry {
-        font-size: 0.75em;
-        color: #aaa;
+        font-size: 0.75em; color: #aaa;
         padding: 4px 0 4px 10px;
         border-left: 2px solid rgba(255, 234, 0, 0.2);
-        margin-bottom: 4px;
-        text-transform: none;
+        margin-bottom: 4px; text-transform: none;
     }
     .rq-log-date { color: #ff8800; margin-right: 8px; }
     .rq-log-author { color: #555; margin-left: 6px; }
     .rq-log-empty { font-size: 0.7em; color: #555; font-style: italic; text-transform: none; }
     .rq-log-form {
-        display: flex;
-        gap: 8px;
-        margin-top: 10px;
-        align-items: flex-end;
-        flex-wrap: wrap;
+        display: flex; gap: 8px; margin-top: 10px;
+        align-items: flex-end; flex-wrap: wrap;
     }
     .rq-log-form input[type="date"] {
-        background: #1a1d26;
-        border: 1px solid #ff8800;
-        color: #ff8800;
-        padding: 6px 8px;
-        font-family: 'Courier New', monospace;
-        font-size: 0.75em;
+        background: #1a1d26; border: 1px solid #ff8800; color: #ff8800;
+        padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em;
     }
     .rq-log-form input[type="date"]:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
     .rq-log-form textarea {
-        flex: 1;
-        min-width: 200px;
-        background: #1a1d26;
-        border: 1px solid #333;
-        color: #00f2ff;
-        padding: 6px 10px;
-        font-family: 'Courier New', monospace;
-        font-size: 0.75em;
-        text-transform: none;
-        resize: vertical;
-        min-height: 36px;
-        max-height: 120px;
+        flex: 1; min-width: 0; background: #1a1d26; border: 1px solid #333;
+        color: #00f2ff; padding: 6px 10px; font-family: 'Courier New', monospace;
+        font-size: 0.75em; text-transform: none; resize: vertical;
+        min-height: 36px; max-height: 120px; box-sizing: border-box;
     }
     .rq-log-form textarea:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
     .rq-log-btn {
-        background: none;
-        border: 1px solid #00f2ff;
-        color: #00f2ff;
-        padding: 6px 15px;
-        font-family: 'Courier New', monospace;
-        font-size: 0.75em;
-        cursor: pointer;
-        text-transform: uppercase;
-        transition: all 0.2s;
-        white-space: nowrap;
+        background: none; border: 1px solid #00f2ff; color: #00f2ff;
+        padding: 6px 15px; font-family: 'Courier New', monospace; font-size: 0.75em;
+        cursor: pointer; text-transform: uppercase; transition: all 0.2s; white-space: nowrap;
     }
     .rq-log-btn:hover { background: #00f2ff; color: #0a0b10; }
     .rq-complete-form { margin-top: 12px; text-align: right; }
     .rq-complete-btn {
-        background: none;
-        border: 1px solid #00ff9d;
-        color: #00ff9d;
-        padding: 8px 20px;
-        font-family: 'Courier New', monospace;
-        font-size: 0.8em;
-        cursor: pointer;
-        text-transform: uppercase;
-        transition: all 0.2s;
-        letter-spacing: 2px;
+        background: none; border: 1px solid #00ff9d; color: #00ff9d;
+        padding: 8px 20px; font-family: 'Courier New', monospace; font-size: 0.8em;
+        cursor: pointer; text-transform: uppercase; transition: all 0.2s; letter-spacing: 2px;
     }
     .rq-complete-btn:hover { background: #00ff9d; color: #0a0b10; box-shadow: 0 0 10px rgba(0, 255, 157, 0.4); }
     .rq-abandon-btn {
-        background: none;
-        border: 1px solid #ff0044;
-        color: #ff0044;
-        padding: 8px 20px;
-        font-family: 'Courier New', monospace;
-        font-size: 0.8em;
-        cursor: pointer;
-        text-transform: uppercase;
-        transition: all 0.2s;
-        letter-spacing: 2px;
+        background: none; border: 1px solid #ff0044; color: #ff0044;
+        padding: 8px 20px; font-family: 'Courier New', monospace; font-size: 0.8em;
+        cursor: pointer; text-transform: uppercase; transition: all 0.2s; letter-spacing: 2px;
     }
     .rq-abandon-btn:hover { background: #ff0044; color: #0a0b10; box-shadow: 0 0 8px rgba(255, 0, 68, 0.5); }
-    .rq-card-logged { opacity: 0.55; }
-    .rq-card-logged:hover { opacity: 0.85; }
-    .rq-logged-badge {
-        font-size: 0.75em; color: #00ff9d; margin-bottom: 8px;
-        letter-spacing: 1px; text-transform: none;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
-    .rq-separator {
-        text-align: center; margin: 25px 0 20px;
-        border-top: 1px solid rgba(0, 255, 157, 0.25);
-        position: relative;
-    }
-    .rq-separator span {
-        background: #0a0b10; color: #00ff9d; font-size: 0.7em;
-        letter-spacing: 2px; padding: 0 12px;
-        position: relative; top: -0.65em;
-    }
     .no-quests { text-align: center; color: #555; padding: 40px; font-size: 0.9em; }
     @media (max-width: 600px) {
         body { padding: 10px; }
         .hud-container { padding: 15px; }
+        .rc-grid { grid-template-columns: 1fr; }
         .rq-log-form { flex-direction: column; }
     }
     </style>
@@ -4559,9 +4704,23 @@ function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
         </div>
         <h1>Recurring Quests</h1>
         <div class="quest-stats"><span>${loggedCount}</span> LOGGED TODAY / <span>${totalCount}</span> TOTAL</div>
-        ${questCards || '<div class="no-quests">NO RECURRING QUESTS. MARK A MINION AS RECURRING TO GET STARTED.</div>'}
+        <div class="rc-grid">
+        ${questCards || '<div class="no-quests" style="grid-column:1/-1">NO RECURRING QUESTS. MARK A MINION AS RECURRING TO GET STARTED.</div>'}
+        </div>
     </div>
     <script>
+    function toggleRecurring(rid) {
+        var panel = document.getElementById('re-' + rid);
+        var card = document.querySelector('.rc-card[data-rid="' + rid + '"]');
+        var isOpen = panel.classList.contains('open');
+        document.querySelectorAll('.rc-expand.open').forEach(function(p) { p.classList.remove('open'); });
+        document.querySelectorAll('.rc-card.active').forEach(function(c) { c.classList.remove('active'); });
+        if (!isOpen) {
+            panel.classList.add('open');
+            card.classList.add('active');
+            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 100);
+        }
+    }
     function confirmComplete(form) {
         return confirm('Submit this recurring quest for teacher review?');
     }
@@ -4612,22 +4771,17 @@ app.get("/recurring", async (req, res) => {
 
     function buildCard(q) {
       const qid = q["Quest ID"];
+      const safeQid = (qid || "").replace(/[^A-Z0-9]/gi, "");
       const logs = logsByQuest[qid] || [];
       const recent = logs.slice(0, 3);
       const hasLogToday = loggedTodayIds.has(qid);
 
-      const statusClass = q["Status"] === "Submitted" ? " submitted" : q["Status"] === "Rejected" ? " rejected" : "";
+      const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Rejected: "#ff0044" };
+      const sc = statusColors[q["Status"]] || "#555";
       const subjectDisplay = q["Subject"] ? `<div class="rq-subject">SUBJECT: ${escHtml(q["Subject"])}</div>` : "";
 
-      // Find today's log note for the "logged" badge
-      let todayNote = "";
-      if (hasLogToday) {
-        const todayLog = logs.find(l => (l["Date"] || "").slice(0, 10) === today);
-        if (todayLog) todayNote = escHtml(todayLog["Note"] || "");
-      }
-      const loggedBadge = hasLogToday
-        ? `<div class="rq-logged-badge">\u2705 LOGGED TODAY${todayNote ? ": " + todayNote : ""}</div>`
-        : "";
+      const loggedBadge = hasLogToday ? `<span class="rc-logged-badge">\u2705</span>` : "";
+      const rejectBadge = q["Status"] === "Rejected" ? `<span class="rc-reject-badge">!</span>` : "";
 
       let logEntries = "";
       if (recent.length > 0) {
@@ -4668,42 +4822,55 @@ app.get("/recurring", async (req, res) => {
       }
 
       const rejectedNote = q["Status"] === "Rejected" && q["Feedback"]
-        ? `<div style="font-size:0.75em;color:#ff0044;margin-top:4px;text-transform:none;">REJECTED: ${escHtml(q["Feedback"])}</div>`
+        ? `<div class="rc-reject-reason">REJECTED: ${escHtml(q["Feedback"])}</div>`
         : "";
 
-      return `
-        <div class="rq-card${hasLogToday ? " rq-card-logged" : ""}">
-          <div class="rq-header">
-            <span class="rq-id">${qid}</span>
-            <div style="text-align:right;">
-              <span class="rq-status${statusClass}">${q["Status"]}</span>
+      // Compact summary card
+      let html = `
+        <div class="rc-card${hasLogToday ? " rc-card-logged" : ""}" data-rid="${safeQid}" onclick="toggleRecurring('${safeQid}')">
+          <div class="rc-summary">
+            <div class="rc-left">
+              <span class="rc-minion">${escHtml(q["Minion"])}</span>
+              <span class="rc-boss">${escHtml(q["Boss"])}</span>
+            </div>
+            <div class="rc-right">
+              ${rejectBadge}${loggedBadge}
+              <span class="rc-status" style="color:${sc}">${q["Status"]}</span>
+              <span class="rc-log-count">${logs.length} logs</span>
             </div>
           </div>
-          <div class="rq-target">
-            <span class="rq-boss">${escHtml(q["Boss"])}</span>
-            <span class="rq-arrow">&gt;</span>
-            <span class="rq-minion">${escHtml(q["Minion"])}</span>
-          </div>
-          <div class="rq-sector">SECTOR: ${escHtml(q["Sector"])}</div>
-          ${subjectDisplay}
-          <div class="rq-task">
-            <span class="rq-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details."}
-          </div>
-          ${rejectedNote}
-          ${loggedBadge}
-          <div class="rq-log-section">
-            <div class="rq-log-title">PROGRESS LOG (${logs.length} entries)</div>
-            ${logEntries}
-            ${logForm}
-          </div>
-          ${actionControls}
         </div>`;
+
+      // Full-width expand panel
+      html += `
+        <div class="rc-expand" id="re-${safeQid}">
+          <div class="rc-expand-inner">
+            <div class="rc-expand-header">
+              <span class="rc-expand-name">${escHtml(q["Boss"])} &gt; ${escHtml(q["Minion"])}</span>
+              <span class="rc-id">${qid}</span>
+            </div>
+            <div class="rq-sector">SECTOR: ${escHtml(q["Sector"])}</div>
+            ${subjectDisplay}
+            ${rejectedNote}
+            <div class="rq-task">
+              <span class="rq-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details."}
+            </div>
+            <div class="rq-log-section">
+              <div class="rq-log-title">PROGRESS LOG (${logs.length} entries)</div>
+              ${logEntries}
+              ${logForm}
+            </div>
+            ${actionControls}
+          </div>
+        </div>`;
+
+      return html;
     }
 
     let questCards = "";
     for (const q of notLoggedToday) questCards += buildCard(q);
     if (notLoggedToday.length > 0 && loggedToday.length > 0) {
-      questCards += `<div class="rq-separator"><span>\u2713 LOGGED TODAY (${loggedToday.length})</span></div>`;
+      questCards += `<div class="rc-separator"><span>\u2713 LOGGED TODAY (${loggedToday.length})</span></div>`;
     }
     for (const q of loggedToday) questCards += buildCard(q);
 
@@ -5036,7 +5203,7 @@ app.get("/army", async (req, res) => {
       }
     }
 
-    const starSvg = `<svg width="12" height="12" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:2px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5" filter="url(#armyStarGlow)"/><defs><filter id="armyStarGlow"><feGaussianBlur stdDeviation="1.2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs></svg>`;
+    const heartSvgIcon = `<svg width="12" height="10" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:2px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
 
     const totals = {
       intel: getStat(commandCenter, "Intel").totalPossible,
@@ -5074,7 +5241,7 @@ app.get("/army", async (req, res) => {
         const isSurvival = survivalBossKeys.has(`${sector}|${m["Boss"]}`);
         const isRecent = m._enslavedDate >= recentCutoff;
         const bossCell = isSurvival
-          ? `<td class="survival-boss-cell">${starSvg} ${escHtml(m["Boss"])}</td>`
+          ? `<td class="survival-boss-cell">${heartSvgIcon} ${escHtml(m["Boss"])}</td>`
           : `<td>${escHtml(m["Boss"])}</td>`;
         const trClass = [isSurvival && "survival-row", isRecent && "recent-row"].filter(Boolean).join(" ");
         rows += `<tr${trClass ? ` class="${trClass}"` : ''}>
@@ -5176,7 +5343,7 @@ app.get("/army", async (req, res) => {
     tr:hover td { background: rgba(0, 255, 157, 0.05); }
     tr.survival-row { background: rgba(255, 68, 68, 0.04); }
     tr.survival-row:hover td { background: rgba(255, 68, 68, 0.08); }
-    .survival-boss-cell { color: #ffea00; text-shadow: 0 0 6px rgba(255, 234, 0, 0.3); }
+    .survival-boss-cell { color: #ff4444; text-shadow: 0 0 6px rgba(255, 68, 68, 0.3); }
     .date-col { color: #888; font-size: 0.85em; }
     tr.recent-row { background: rgba(0, 255, 157, 0.06); }
     tr.recent-row td { border-left: 0; }
@@ -5274,7 +5441,7 @@ app.get("/defiant", async (req, res) => {
       }
     }
 
-    const starSvg = `<svg width="12" height="12" viewBox="0 0 20 20" style="vertical-align:middle;margin-right:2px;"><polygon points="10,1 12.9,7.4 20,7.8 14.5,12.6 16.2,19.5 10,15.8 3.8,19.5 5.5,12.6 0,7.8 7.1,7.4" fill="#ffea00" stroke="#ffea00" stroke-width="0.5"/></svg>`;
+    const heartSvgIcon = `<svg width="12" height="10" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:2px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
 
     // Stat totals for normalization
     const getStat = (cc, name) => {
@@ -5317,7 +5484,7 @@ app.get("/defiant", async (req, res) => {
 
         let questBtn;
         if (onQuest) {
-          questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
+          questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
         } else if (m["Status"] === "Engaged") {
           questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(m["Boss"])}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
         } else {
@@ -5326,7 +5493,7 @@ app.get("/defiant", async (req, res) => {
 
         const recurTag = isRec ? `<span class="rec-tag">REC</span>` : "";
         const bossCell = isSurvival
-          ? `<td class="survival-boss-cell">${starSvg} ${escHtml(m["Boss"])}</td>`
+          ? `<td class="survival-boss-cell">${heartSvgIcon} ${escHtml(m["Boss"])}</td>`
           : `<td>${escHtml(m["Boss"])}</td>`;
         const statusColor = { Engaged: "#ff6600", Locked: "#555" };
         const sc = statusColor[m["Status"]] || "#555";
@@ -5442,7 +5609,7 @@ app.get("/defiant", async (req, res) => {
     tr:hover td { background: rgba(255, 102, 0, 0.05); }
     tr.survival-row { background: rgba(255, 234, 0, 0.04); }
     tr.survival-row:hover td { background: rgba(255, 234, 0, 0.08); }
-    .survival-boss-cell { color: #ffea00; text-shadow: 0 0 6px rgba(255, 234, 0, 0.3); }
+    .survival-boss-cell { color: #ff4444; text-shadow: 0 0 6px rgba(255, 68, 68, 0.3); }
     .quest-chk { cursor: pointer; accent-color: #ff6600; }
     .quest-batch-bar {
         position: fixed; bottom: 0; left: 0; right: 0;
@@ -7977,7 +8144,7 @@ app.get("/admin/manual", async (req, res) => {
     const successMsg = addedCount > 0
       ? `<div class="success-msg">&#x2714; ${addedCount} MINION${addedCount > 1 ? "S" : ""} ADDED SUCCESSFULLY!</div>` : "";
     const addedToQuest = req.query.quest === "1"
-      ? `<div class="success-msg" style="color:#ff6600;">&#x2605; ALSO ADDED TO QUEST BOARD</div>` : "";
+      ? `<div class="success-msg" style="color:#ff6600;">&#x2665; ALSO ADDED TO QUEST BOARD</div>` : "";
 
     res.send(`<!DOCTYPE html>
 <html>
