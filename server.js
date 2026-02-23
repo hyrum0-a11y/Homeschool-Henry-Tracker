@@ -4802,6 +4802,18 @@ app.get("/quests", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Today's Dashboard
 // ---------------------------------------------------------------------------
+const TODAY_GIFS = [
+  "https://media1.tenor.com/m/zVN-rV1cF5EAAAAC/iron-lung-markiplier.gif",
+  "https://media1.tenor.com/m/Zd54vWoIe3sAAAAC/clue-negative.gif",
+  "https://media1.tenor.com/m/WBnmfSw_iocAAAAC/drg-deep-rock-galactic.gif",
+  "https://media1.tenor.com/m/YkKT0_BTRtQAAAAC/drg-deep-rock-galactic.gif",
+  "https://media1.tenor.com/m/eZHAeJvePwAAAAAC/ultrakill-v1-ultrakill.gif",
+  "https://media1.tenor.com/m/5XQdCD78bkUAAAAC/portal-portal2.gif",
+  "https://media1.tenor.com/m/a1S1cv1OEloAAAAC/miracle-musical-portal-2.gif",
+  "https://media1.tenor.com/m/v5lxzTqe79AAAAAC/outer-wilds.gif",
+  "https://media1.tenor.com/m/GGkrTidiDE0AAAAC/votv-voices-of-the-void.gif",
+];
+
 const MOTIVATIONAL_QUOTES = [
   "THE SYSTEM BENDS TO THOSE WHO PERSIST.",
   "EVERY MINION ENSLAVED IS A STEP TOWARD DOMINION.",
@@ -4831,6 +4843,9 @@ app.get("/today", async (req, res) => {
 
     // Motivational quote — rotate by day
     const quote = MOTIVATIONAL_QUOTES[Math.floor(Date.now() / 86400000) % MOTIVATIONAL_QUOTES.length];
+
+    // Random GIF — different each page load
+    const gif = TODAY_GIFS[Math.floor(Math.random() * TODAY_GIFS.length)];
 
     // 1. Active non-recurring quests sorted by due date (overdue first)
     const activeQuests = quests.filter(q =>
@@ -4881,7 +4896,7 @@ app.get("/today", async (req, res) => {
           : dueDate ? `<span class="today-badge today-due">DUE ${dueDate}</span>` : "";
         const rejectBadge = isRejected ? `<span class="today-badge today-rejected">REJECTED</span>` : "";
         activeHtml += `
-          <div class="today-card${isOverdue ? " today-card-overdue" : ""}">
+          <a href="/quests" class="today-card-link"><div class="today-card${isOverdue ? " today-card-overdue" : ""}">
             <div class="today-card-top">
               <span class="today-minion">${escHtml(q["Minion"])}</span>
               <div class="today-badges">${rejectBadge}${dueBadge}</div>
@@ -4891,7 +4906,7 @@ app.get("/today", async (req, res) => {
               <span class="today-sector">${escHtml(q["Sector"])}</span>
             </div>
             ${q["Suggested By AI"] ? `<div class="today-task">${escHtml(q["Suggested By AI"])}</div>` : ""}
-          </div>`;
+          </div></a>`;
       }
     }
 
@@ -4904,7 +4919,7 @@ app.get("/today", async (req, res) => {
     } else {
       for (const q of unloggedRecurring) {
         recurringHtml += `
-          <div class="today-card today-card-recurring">
+          <a href="/recurring" class="today-card-link"><div class="today-card today-card-recurring">
             <div class="today-card-top">
               <span class="today-minion">${escHtml(q["Minion"])}</span>
               <span class="today-badge today-unlogged">NOT LOGGED</span>
@@ -4912,7 +4927,7 @@ app.get("/today", async (req, res) => {
             <div class="today-card-meta">
               <span class="today-boss">${escHtml(q["Boss"])}</span>
             </div>
-          </div>`;
+          </div></a>`;
       }
       if (loggedRecurring.length > 0) {
         recurringHtml += `<div class="today-logged-note">${loggedRecurring.length} of ${recurringQuests.length} already logged today</div>`;
@@ -4923,8 +4938,9 @@ app.get("/today", async (req, res) => {
     let submittedHtml = "";
     if (submitted.length > 0) {
       for (const q of submitted) {
+        const submittedLink = req.cookies.role === "teacher" ? "/admin/quests" : "/quests";
         submittedHtml += `
-          <div class="today-card today-card-submitted">
+          <a href="${submittedLink}" class="today-card-link"><div class="today-card today-card-submitted">
             <div class="today-card-top">
               <span class="today-minion">${escHtml(q["Minion"])}</span>
               <span class="today-badge today-submitted-badge">AWAITING REVIEW</span>
@@ -4933,7 +4949,7 @@ app.get("/today", async (req, res) => {
               <span class="today-boss">${escHtml(q["Boss"])}</span>
               ${q["Date Completed"] ? `<span class="today-date">SUBMITTED ${q["Date Completed"]}</span>` : ""}
             </div>
-          </div>`;
+          </div></a>`;
       }
     }
 
@@ -4945,7 +4961,7 @@ app.get("/today", async (req, res) => {
       for (const q of recentCompleted) {
         const timeStr = q["Time Spent"] ? `${q["Time Spent"]} MIN` : "";
         recentHtml += `
-          <div class="today-card today-card-victory">
+          <a href="/progress" class="today-card-link"><div class="today-card today-card-victory">
             <div class="today-card-top">
               <span class="today-minion">${escHtml(q["Minion"])}</span>
               <span class="today-date">${q["Date Resolved"] || ""}</span>
@@ -4955,7 +4971,7 @@ app.get("/today", async (req, res) => {
               ${timeStr ? `<span class="today-time">${timeStr}</span>` : ""}
             </div>
             ${q["Reflection"] ? `<div class="today-reflection">"${escHtml(q["Reflection"])}"</div>` : ""}
-          </div>`;
+          </div></a>`;
       }
     }
 
@@ -5127,10 +5143,23 @@ app.get("/today", async (req, res) => {
         text-shadow: 0 0 8px rgba(0, 255, 157, 0.3);
     }
     .today-logged-note { color: #555; font-size: 0.7em; text-align: center; margin-top: 8px; letter-spacing: 1px; }
+    .today-card-link { text-decoration: none; color: inherit; display: block; }
+    .today-card-link:hover .today-card { transform: translateX(4px); }
+    .today-card { transition: border-color 0.2s, transform 0.2s; }
+    .today-section-link { text-decoration: none; color: inherit; }
+    .today-section-link:hover .today-section-header { opacity: 0.8; }
+    .today-section-arrow { font-size: 0.8em; opacity: 0.5; }
+    .today-section-link:hover .today-section-arrow { opacity: 1; }
+    .today-hero { display: flex; align-items: center; gap: 20px; margin-bottom: 25px; }
+    .today-gif { flex-shrink: 0; }
+    .today-gif img { max-width: 200px; max-height: 160px; border: 1px solid rgba(255,0,255,0.3); border-radius: 4px; display: block; }
+    .today-quote { flex: 1; min-width: 0; margin-bottom: 0; }
     @media (max-width: 600px) {
         body { padding: 10px; }
         .hud-container { padding: 12px; }
         h1 { font-size: 1.1em; }
+        .today-hero { flex-direction: column; text-align: center; }
+        .today-gif img { max-width: 180px; margin: 0 auto; }
         .today-quote { padding: 10px; }
         .today-quote-text { font-size: 0.75em; letter-spacing: 1px; }
     }
@@ -5145,26 +5174,31 @@ app.get("/today", async (req, res) => {
         </div>
         <h1>MISSION BRIEFING</h1>
         <div class="today-date-display">${dayName} // ${dateDisplay}</div>
-        <div class="today-quote">
-            <div class="today-quote-text">${quote}</div>
+        <div class="today-hero">
+            <div class="today-gif">
+                <img src="${gif}" alt="Daily GIF" loading="lazy">
+            </div>
+            <div class="today-quote">
+                <div class="today-quote-text">${quote}</div>
+            </div>
         </div>
-        ${sortedActive.length > 0 || submitted.length > 0 ? `
+        ${sortedActive.length > 0 ? `
         <div class="today-section section-ops">
-            <div class="today-section-header">ACTIVE OPERATIONS <span class="section-count">(${sortedActive.length})</span></div>
+            <a href="/quests" class="today-section-link"><div class="today-section-header">ACTIVE OPERATIONS <span class="section-count">(${sortedActive.length})</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${activeHtml}
         </div>` : ""}
         ${recurringQuests.length > 0 ? `
         <div class="today-section section-recurring">
-            <div class="today-section-header">RECURRING DRILLS <span class="section-count">(${unloggedRecurring.length} remaining)</span></div>
+            <a href="/recurring" class="today-section-link"><div class="today-section-header">RECURRING DRILLS <span class="section-count">(${unloggedRecurring.length} remaining)</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${recurringHtml}
         </div>` : ""}
         ${submitted.length > 0 ? `
         <div class="today-section section-submitted">
-            <div class="today-section-header">AWAITING REVIEW <span class="section-count">(${submitted.length})</span></div>
+            <a href="${req.cookies.role === "teacher" ? "/admin/quests" : "/quests"}" class="today-section-link"><div class="today-section-header">AWAITING REVIEW <span class="section-count">(${submitted.length})</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${submittedHtml}
         </div>` : ""}
         <div class="today-section section-victories">
-            <div class="today-section-header">RECENT VICTORIES <span class="section-count">(${recentCompleted.length})</span></div>
+            <a href="/progress" class="today-section-link"><div class="today-section-header">RECENT VICTORIES <span class="section-count">(${recentCompleted.length})</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${recentHtml}
         </div>
     </div>
