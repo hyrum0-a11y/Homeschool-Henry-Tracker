@@ -1,5 +1,5 @@
 /**
- * Google Apps Script — Email Verification Code Sender
+ * Google Apps Script — Email Sender for Sovereign HUD
  *
  * SETUP INSTRUCTIONS:
  * 1. Go to https://script.google.com and create a new project
@@ -13,10 +13,9 @@
  * 9. Add to your .env file: APPS_SCRIPT_URL=https://script.google.com/macros/s/XXXXX/exec
  * 10. Restart the server
  *
- * HOW IT WORKS:
- * The Sovereign HUD server calls this web app with ?email=...&code=...&name=...
- * This script sends an email with the verification code to the specified address.
- * The code is NEVER stored in the Google Sheet — only in the server's memory.
+ * FUNCTIONS:
+ * doGet  — Sends plain-text verification code emails (called with ?email=...&code=...&name=...)
+ * doPost — Sends HTML emails (called with JSON body: { action: "sendHtml", email, subject, body })
  */
 
 function doGet(e) {
@@ -45,5 +44,34 @@ function doGet(e) {
   } catch (err) {
     return ContentService.createTextOutput("Error: " + err.message)
       .setMimeType(ContentService.MimeType.TEXT);
+  }
+}
+
+function doPost(e) {
+  try {
+    var data = JSON.parse(e.postData.contents);
+
+    if (data.action === "sendHtml") {
+      if (!data.email || !data.subject || !data.body) {
+        return ContentService.createTextOutput(JSON.stringify({ status: "Error", message: "Missing email, subject, or body" }))
+          .setMimeType(ContentService.MimeType.JSON);
+      }
+
+      MailApp.sendEmail({
+        to: data.email,
+        subject: data.subject,
+        htmlBody: data.body,
+        name: "Sovereign HUD"
+      });
+
+      return ContentService.createTextOutput(JSON.stringify({ status: "OK" }))
+        .setMimeType(ContentService.MimeType.JSON);
+    }
+
+    return ContentService.createTextOutput(JSON.stringify({ status: "Error", message: "Unknown action: " + data.action }))
+      .setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "Error", message: err.message }))
+      .setMimeType(ContentService.MimeType.JSON);
   }
 }

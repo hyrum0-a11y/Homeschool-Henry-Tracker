@@ -192,11 +192,284 @@ async function sendVerifyEmail(email, code, name) {
   }
 }
 
+async function sendHtmlEmail(email, subject, htmlBody) {
+  const scriptUrl = process.env.APPS_SCRIPT_URL;
+  if (!scriptUrl) {
+    console.warn("APPS_SCRIPT_URL not set — cannot send HTML email");
+    return false;
+  }
+  try {
+    const resp = await fetch(scriptUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: "sendHtml", email, subject, body: htmlBody }),
+      redirect: "follow",
+    });
+    const text = await resp.text();
+    let result;
+    try { result = JSON.parse(text); } catch { result = { status: text.trim() }; }
+    if (result.status !== "OK") {
+      console.error("HTML email send failed:", result.message || text.substring(0, 500));
+      return false;
+    }
+    console.log("HTML email sent to", email);
+    return true;
+  } catch (err) {
+    console.error("HTML email error:", err.message);
+    return false;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Weekly Summary Email
+// ---------------------------------------------------------------------------
+async function sendWeeklySummaryEmail() {
+  console.log("Building weekly summary email...");
+  const sheets = await getSheets();
+
+  // Fetch all data in one batch
+  const batchRes = await sheets.spreadsheets.values.batchGet({
+    spreadsheetId: SPREADSHEET_ID,
+    ranges: ["Sectors", "Command_Center", "Quests", "Quest_Log", "Users"],
+  });
+  const [sectorsRaw, ccRaw, questsRaw, logsRaw, usersRaw] = batchRes.data.valueRanges;
+  const allMinions = parseTable(sectorsRaw.values || []);
+  const commandCenter = parseTable(ccRaw.values || []);
+  const quests = parseTable(questsRaw.values || []);
+  const questLogs = parseTable(logsRaw.values || []);
+  const users = parseTable(usersRaw.values || []);
+
+  // Teacher emails
+  const teachers = users.filter(u => (u["Role"] || "").toLowerCase() === "teacher" && u["Email"]);
+  if (teachers.length === 0) {
+    console.log("No teacher emails found — skipping weekly email");
+    return;
+  }
+
+  // Date range: last 7 days
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(weekStart.getDate() - 7);
+  const weekStartStr = weekStart.toISOString().slice(0, 10);
+  const todayStr = now.toISOString().slice(0, 10);
+
+  // 1. Quests completed this week
+  const completedThisWeek = quests.filter(q =>
+    q["Status"] === "Approved" && (q["Date Resolved"] || "").slice(0, 10) >= weekStartStr
+  );
+
+  // 2. Total time spent (quests + recurring logs this week)
+  let totalMinutes = 0;
+  for (const q of completedThisWeek) {
+    totalMinutes += parseInt(q["Time Spent"]) || 0;
+  }
+  const weekLogs = questLogs.filter(l => (l["Date"] || "").slice(0, 10) >= weekStartStr);
+  for (const l of weekLogs) {
+    totalMinutes += parseInt(l["Time Spent"]) || 0;
+  }
+  const timeHours = Math.floor(totalMinutes / 60);
+  const timeMins = totalMinutes % 60;
+  const timeStr = timeHours > 0 ? `${timeHours}h ${timeMins}m` : `${timeMins}m`;
+
+  // 3. Submitted queue (awaiting review)
+  const submitted = quests.filter(q => q["Status"] === "Submitted");
+
+  // 4. Recurring quest log rate
+  const recCol = findRecurringCol(allMinions);
+  const activeRecurring = quests.filter(q =>
+    (q["Recurring"] || "").toUpperCase() === "X" && (q["Status"] === "Active" || q["Status"] === "Rejected")
+  );
+  const recurringStats = [];
+  for (const rq of activeRecurring) {
+    const qid = rq["Quest ID"];
+    const logsForQuest = weekLogs.filter(l => l["Quest ID"] === qid);
+    const loggedDates = new Set(logsForQuest.map(l => (l["Date"] || "").slice(0, 10)));
+    recurringStats.push({
+      minion: rq["Minion"],
+      boss: rq["Boss"],
+      daysLogged: loggedDates.size,
+    });
+  }
+
+  // 5. Overdue active quests
+  const overdue = quests.filter(q => {
+    const due = q["Due Date"] || "";
+    return q["Status"] === "Active" && due && due < todayStr;
+  });
+
+  // 6. Henry's reflections from completed quests
+  const reflections = completedThisWeek
+    .filter(q => q["Reflection"])
+    .map(q => ({ minion: q["Minion"], boss: q["Boss"], reflection: q["Reflection"] }));
+
+  // 7. Overall conquest
+  const totalCount = allMinions.length;
+  const enslavedCount = allMinions.filter(m => m["Status"] === "Enslaved").length;
+  const conquestPct = totalCount > 0 ? Math.round(enslavedCount / totalCount * 100) : 0;
+
+  // 8. Stat levels
+  const intel = getStat(commandCenter, "Intel");
+  const stamina = getStat(commandCenter, "Stamina");
+  const tempo = getStat(commandCenter, "Tempo");
+  const reputation = getStat(commandCenter, "Reputation");
+
+  // Format date range
+  const fmtDate = (d) => d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+  const dateRange = `${fmtDate(weekStart)} – ${fmtDate(now)}`;
+
+  // Build HTML email
+  const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+  let completedRows = "";
+  for (const q of completedThisWeek) {
+    completedRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(q["Minion"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#888;">${esc(q["Sector"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${parseInt(q["Time Spent"]) || 0}m</td></tr>`;
+  }
+
+  let submittedRows = "";
+  for (const q of submitted) {
+    submittedRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(q["Minion"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ffea00;">${q["Date Completed"] || ""}</td></tr>`;
+  }
+
+  let recurringRows = "";
+  for (const r of recurringStats) {
+    const color = r.daysLogged >= 5 ? "#00ff9d" : r.daysLogged >= 3 ? "#ffea00" : "#ff0044";
+    recurringRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(r.minion)}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(r.boss)}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:${color};font-weight:bold;">${r.daysLogged}/7 days</td></tr>`;
+  }
+
+  let overdueRows = "";
+  for (const q of overdue) {
+    overdueRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(q["Minion"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff0044;">${q["Due Date"]}</td></tr>`;
+  }
+
+  let reflectionRows = "";
+  for (const r of reflections) {
+    reflectionRows += `<tr><td style="padding:8px 10px;border-bottom:1px solid #333;color:#00f2ff;font-style:italic;font-size:13px;">"${esc(r.reflection)}"<br><span style="color:#888;font-style:normal;font-size:11px;">${esc(r.boss)} &gt; ${esc(r.minion)}</span></td></tr>`;
+  }
+
+  const siteUrl = "https://homeschool-tracker.hyrumjones.com";
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="margin:0;padding:0;background:#0a0b10;font-family:'Courier New',Courier,monospace;">
+<table width="100%" cellpadding="0" cellspacing="0" style="background:#0a0b10;"><tr><td align="center" style="padding:20px 10px;">
+<table width="600" cellpadding="0" cellspacing="0" style="background:#0a0b10;border:2px solid #ffea00;max-width:600px;">
+
+  <!-- Header -->
+  <tr><td style="padding:25px 20px 10px;text-align:center;">
+    <div style="color:#ffea00;font-size:22px;font-weight:bold;letter-spacing:4px;text-shadow:2px 2px #ff00ff;">SOVEREIGN HUD</div>
+    <div style="color:#888;font-size:12px;letter-spacing:3px;margin-top:4px;">WEEKLY PROGRESS REPORT</div>
+    <div style="color:#555;font-size:11px;margin-top:6px;">${esc(dateRange)}</div>
+  </td></tr>
+
+  <!-- Summary Stats -->
+  <tr><td style="padding:15px 20px;">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td width="25%" style="text-align:center;padding:12px 5px;border:1px solid #333;">
+          <div style="color:#00ff9d;font-size:24px;font-weight:bold;">${completedThisWeek.length}</div>
+          <div style="color:#888;font-size:10px;letter-spacing:1px;">QUESTS DONE</div>
+        </td>
+        <td width="25%" style="text-align:center;padding:12px 5px;border:1px solid #333;">
+          <div style="color:#ff8800;font-size:24px;font-weight:bold;">${timeStr}</div>
+          <div style="color:#888;font-size:10px;letter-spacing:1px;">TIME SPENT</div>
+        </td>
+        <td width="25%" style="text-align:center;padding:12px 5px;border:1px solid #333;">
+          <div style="color:#ffea00;font-size:24px;font-weight:bold;">${conquestPct}%</div>
+          <div style="color:#888;font-size:10px;letter-spacing:1px;">CONQUERED</div>
+        </td>
+        <td width="25%" style="text-align:center;padding:12px 5px;border:1px solid #333;">
+          <div style="color:#ff00ff;font-size:24px;font-weight:bold;">${submitted.length}</div>
+          <div style="color:#888;font-size:10px;letter-spacing:1px;">AWAITING REVIEW</div>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+
+  <!-- Stat Levels -->
+  <tr><td style="padding:10px 20px;">
+    <table width="100%" cellpadding="0" cellspacing="0">
+      <tr>
+        <td style="padding:4px 8px;color:#00f2ff;font-size:11px;letter-spacing:1px;">INTEL: <strong>${intel.level}</strong> <span style="color:#555;">(${Math.round(intel.value)})</span></td>
+        <td style="padding:4px 8px;color:#00ff9d;font-size:11px;letter-spacing:1px;">STAMINA: <strong>${stamina.level}</strong> <span style="color:#555;">(${Math.round(stamina.value)})</span></td>
+      </tr>
+      <tr>
+        <td style="padding:4px 8px;color:#ff00ff;font-size:11px;letter-spacing:1px;">TEMPO: <strong>${tempo.level}</strong> <span style="color:#555;">(${Math.round(tempo.value)})</span></td>
+        <td style="padding:4px 8px;color:#ff8800;font-size:11px;letter-spacing:1px;">REPUTATION: <strong>${reputation.level}</strong> <span style="color:#555;">(${Math.round(reputation.value)})</span></td>
+      </tr>
+    </table>
+  </td></tr>
+
+  ${completedThisWeek.length > 0 ? `
+  <!-- Completed Quests -->
+  <tr><td style="padding:15px 20px 5px;">
+    <div style="color:#00ff9d;font-size:13px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #333;padding-bottom:6px;">&#x2713; QUESTS COMPLETED (${completedThisWeek.length})</div>
+  </td></tr>
+  <tr><td style="padding:0 20px 10px;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;">${completedRows}</table>
+  </td></tr>` : ""}
+
+  ${reflections.length > 0 ? `
+  <!-- Reflections -->
+  <tr><td style="padding:15px 20px 5px;">
+    <div style="color:#00f2ff;font-size:13px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #333;padding-bottom:6px;">&#x1F4AD; HENRY'S REFLECTIONS</div>
+  </td></tr>
+  <tr><td style="padding:0 20px 10px;">
+    <table width="100%" cellpadding="0" cellspacing="0">${reflectionRows}</table>
+  </td></tr>` : ""}
+
+  ${submitted.length > 0 ? `
+  <!-- Submitted Queue -->
+  <tr><td style="padding:15px 20px 5px;">
+    <div style="color:#ffea00;font-size:13px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #333;padding-bottom:6px;">&#x23F3; AWAITING REVIEW (${submitted.length})</div>
+  </td></tr>
+  <tr><td style="padding:0 20px 10px;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;">${submittedRows}</table>
+  </td></tr>` : ""}
+
+  ${activeRecurring.length > 0 ? `
+  <!-- Recurring Log Rate -->
+  <tr><td style="padding:15px 20px 5px;">
+    <div style="color:#00f2ff;font-size:13px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #333;padding-bottom:6px;">&#x1F504; RECURRING QUEST LOG RATE</div>
+  </td></tr>
+  <tr><td style="padding:0 20px 10px;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;">${recurringRows}</table>
+  </td></tr>` : ""}
+
+  ${overdue.length > 0 ? `
+  <!-- Overdue -->
+  <tr><td style="padding:15px 20px 5px;">
+    <div style="color:#ff0044;font-size:13px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #333;padding-bottom:6px;">&#x26A0; OVERDUE QUESTS (${overdue.length})</div>
+  </td></tr>
+  <tr><td style="padding:0 20px 10px;">
+    <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;">${overdueRows}</table>
+  </td></tr>` : ""}
+
+  <!-- Footer -->
+  <tr><td style="padding:20px;text-align:center;border-top:1px solid #333;">
+    <a href="${siteUrl}" style="color:#00f2ff;font-size:12px;letter-spacing:2px;">VIEW FULL HUD &gt;&gt;</a>
+    <div style="color:#444;font-size:10px;margin-top:8px;">Auto-generated by Sovereign HUD</div>
+  </td></tr>
+
+</table>
+</td></tr></table>
+</body>
+</html>`;
+
+  const subject = `Sovereign HUD — Weekly Report (${fmtDate(now)})`;
+  let sentCount = 0;
+  for (const teacher of teachers) {
+    const sent = await sendHtmlEmail(teacher["Email"], subject, html);
+    if (sent) sentCount++;
+  }
+  console.log(`Weekly summary email sent to ${sentCount}/${teachers.length} teacher(s)`);
+}
+
 // ---------------------------------------------------------------------------
 // Ensure the Quests sheet tab exists (auto-create with headers if missing)
 // ---------------------------------------------------------------------------
 async function ensureQuestsSheet(sheets) {
-  const expectedHeaders = ["Quest ID", "Boss", "Minion", "Sector", "Status", "Proof Type", "Proof Link", "Suggested By AI", "Date Completed", "Date Added", "Date Resolved", "Feedback", "Due Date", "Subject", "Recurring"];
+  const expectedHeaders = ["Quest ID", "Boss", "Minion", "Sector", "Status", "Proof Type", "Proof Link", "Suggested By AI", "Date Completed", "Date Added", "Date Resolved", "Feedback", "Due Date", "Subject", "Recurring", "Reflection", "Time Spent"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
     fields: "sheets.properties.title",
@@ -350,7 +623,7 @@ async function ensureBadgesSheet(sheets) {
 // Ensure Quest_Log sheet exists (for recurring quest daily entries)
 // ---------------------------------------------------------------------------
 async function ensureQuestLogSheet(sheets) {
-  const expectedHeaders = ["Quest ID", "Date", "Note", "Author"];
+  const expectedHeaders = ["Quest ID", "Date", "Note", "Author", "Time Spent"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
     fields: "sheets.properties.title",
@@ -1952,6 +2225,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
     .side-nav a:hover {
         padding-left: 20px;
     }
+    .nav-today { color: #ff8800; border-color: #ff8800; box-shadow: 0 0 8px rgba(255,136,0,0.2); }
+    .nav-today:hover { background: #ff8800; color: #0a0b10; box-shadow: 0 0 15px rgba(255,136,0,0.5); }
     .nav-army { color: #00ff9d; border-color: #00ff9d; box-shadow: 0 0 8px rgba(0,255,157,0.2); }
     .nav-army:hover { background: #00ff9d; color: #0a0b10; box-shadow: 0 0 15px rgba(0,255,157,0.5); }
     .nav-progress { color: #ffea00; border-color: #ffea00; box-shadow: 0 0 8px rgba(255,234,0,0.2); }
@@ -2241,6 +2516,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         [[QUEST_STATUS_NAV]]
         [[NAV_NOTIFICATIONS]]
         <div class="nav-section-label">LINKS</div>
+        <a href="/today" class="nav-today">&#x1F4CB; TODAY</a>
         <a href="/army" class="nav-army">[[ARMY_LINK]]</a>
         <a href="/badges" class="nav-badges">[[BADGES_LINK]]</a>
         <a href="/progress" class="nav-progress">&#x1F4CA; PROGRESS</a>
@@ -2293,7 +2569,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
     const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
     let questBtn;
     if (onQuest) {
-      questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
+      questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
     } else if (m["Status"] === "Engaged") {
       questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
     } else {
@@ -2408,9 +2684,10 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
     td[title]:not([title=""]) { cursor: help; border-bottom: 1px dotted #555; }
     .quest-chk { width: 16px; height: 16px; accent-color: #ff6600; cursor: pointer; }
     .quest-batch-bar {
-        display: flex; align-items: center; justify-content: center; gap: 15px;
-        margin-top: 15px; padding: 10px; border: 1px solid #ff6600;
-        background: rgba(255, 102, 0, 0.08);
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+        display: none; align-items: center; justify-content: center; gap: 15px;
+        padding: 10px 20px; border-top: 2px solid #ff6600;
+        background: #0a0b10; box-shadow: 0 -4px 15px rgba(255,102,0,0.3);
     }
     .quest-batch-count { color: #ffea00; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
     .quest-due-label { color: #ff8800; font-size: 0.8em; font-weight: bold; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
@@ -2425,10 +2702,13 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
         cursor: pointer; letter-spacing: 1px; transition: all 0.2s;
     }
     .quest-batch-btn:hover { background: #ffea00; box-shadow: 0 0 10px rgba(255, 234, 0, 0.5); }
+    @media (max-width: 600px) {
+        .quest-batch-bar { flex-wrap: wrap; justify-content: center; gap: 8px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
+    }
     </style>
 </head>
 <body>
-    <div class="hud-container">
+    <div class="hud-container" style="padding-bottom:70px;">
         <a class="back-link" href="/">&lt; BACK TO HUD</a>
         <h1>${bossName}</h1>
         ${survivalBadge}
@@ -2449,12 +2729,12 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
             </thead>
             <tbody>${rows}</tbody>
         </table>
-        <div class="quest-batch-bar" style="display:none;">
-            <span class="quest-batch-count">0 SELECTED</span>
-            <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
-            <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
-        </div>
         <div style="text-align:center;margin-top:15px;font-size:0.75em;color:#ff6600;">SELECT ENGAGED MINIONS TO ADD TO YOUR QUEST BOARD</div>
+    </div>
+    <div class="quest-batch-bar">
+        <span class="quest-batch-count">0 SELECTED</span>
+        <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
+        <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
     </div>
     <script>
     (function() {
@@ -3227,7 +3507,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
       const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
       let questBtn;
       if (onQuest) {
-        questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
+        questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
       } else if (m["Status"] === "Engaged") {
         questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sectorName)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
       } else {
@@ -3301,9 +3581,10 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
     td[title]:not([title=""]) { cursor: help; border-bottom: 1px dotted #555; }
     .quest-chk { width: 16px; height: 16px; accent-color: #ff6600; cursor: pointer; }
     .quest-batch-bar {
-        display: flex; align-items: center; justify-content: center; gap: 15px;
-        margin-top: 15px; padding: 10px; border: 1px solid #ff6600;
-        background: rgba(255, 102, 0, 0.08);
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+        display: none; align-items: center; justify-content: center; gap: 15px;
+        padding: 10px 20px; border-top: 2px solid #ff6600;
+        background: #0a0b10; box-shadow: 0 -4px 15px rgba(255,102,0,0.3);
     }
     .quest-batch-count { color: #ffea00; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
     .quest-due-label { color: #ff8800; font-size: 0.8em; font-weight: bold; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
@@ -3321,20 +3602,21 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
     @media (max-width: 700px) {
         table { font-size: 0.7em; }
         td, th { padding: 5px; }
+        .quest-batch-bar { flex-wrap: wrap; justify-content: center; gap: 8px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
     }
     </style>
 </head>
 <body>
-    <div class="hud-container">
+    <div class="hud-container" style="padding-bottom:70px;">
         <a class="back-link" href="/">&lt; BACK TO HUD</a>
         <h1>${escHtml(sectorName)}</h1>
         <div class="sector-tag">SECTOR OVERVIEW &mdash; ${bosses.length} BOSS${bosses.length !== 1 ? "ES" : ""}</div>
         ${bossBlocks}
-        <div class="quest-batch-bar" style="display:none;">
-            <span class="quest-batch-count">0 SELECTED</span>
-            <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
-            <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
-        </div>
+    </div>
+    <div class="quest-batch-bar">
+        <span class="quest-batch-count">0 SELECTED</span>
+        <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
+        <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
     </div>
     <script>
     (function() {
@@ -3475,7 +3757,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
       const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
       let questBtn;
       if (onQuest) {
-        questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
+        questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
       } else if (m["Status"] === "Engaged") {
         questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(bossName)}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
       } else {
@@ -3555,9 +3837,10 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
     td[title]:not([title=""]) { cursor: help; border-bottom: 1px dotted #555; }
     .quest-chk { width: 16px; height: 16px; accent-color: #ff6600; cursor: pointer; }
     .quest-batch-bar {
-        display: flex; align-items: center; justify-content: center; gap: 15px;
-        margin-top: 15px; padding: 10px; border: 1px solid #ff6600;
-        background: rgba(255, 102, 0, 0.08);
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+        display: none; align-items: center; justify-content: center; gap: 15px;
+        padding: 10px 20px; border-top: 2px solid #ff6600;
+        background: #0a0b10; box-shadow: 0 -4px 15px rgba(255,102,0,0.3);
     }
     .quest-batch-count { color: #ffea00; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
     .quest-due-label { color: #ff8800; font-size: 0.8em; font-weight: bold; letter-spacing: 1px; display: flex; align-items: center; gap: 6px; }
@@ -3575,21 +3858,22 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
     @media (max-width: 700px) {
         table { font-size: 0.7em; }
         td, th { padding: 5px; }
+        .quest-batch-bar { flex-wrap: wrap; justify-content: center; gap: 8px; padding-bottom: calc(10px + env(safe-area-inset-bottom, 0px)); }
     }
     </style>
 </head>
 <body>
-    <div class="hud-container">
+    <div class="hud-container" style="padding-bottom:70px;">
         <a class="back-link" href="/">&lt; BACK TO HUD</a>
         <h1>&#x1F6E1; Ring of Guardians</h1>
         <div class="guardian-subtitle">SURVIVAL MODE BOSSES &mdash; ENSLAVE ALL GUARDIANS TO UNLOCK SURVIVAL</div>
         ${bossBlocks}
-        <div class="quest-batch-bar" style="display:none;">
-            <span class="quest-batch-count">0 SELECTED</span>
-            <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
-            <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
-        </div>
         <div style="text-align:center;margin-top:15px;font-size:0.75em;color:#ff6600;">SELECT ENGAGED MINIONS TO ADD TO YOUR QUEST BOARD</div>
+    </div>
+    <div class="quest-batch-bar">
+        <span class="quest-batch-count">0 SELECTED</span>
+        <label class="quest-due-label">DUE: <input type="date" class="quest-batch-due"></label>
+        <button type="button" class="quest-batch-btn">ADD SELECTED TO QUEST BOARD</button>
     </div>
     <script>
     (function() {
@@ -3725,7 +4009,7 @@ app.get("/guardians", async (req, res) => {
 // ---------------------------------------------------------------------------
 // Quest Board Page Template
 // ---------------------------------------------------------------------------
-function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount = 0) {
+function buildQuestBoardPage(cardHtml, expandHtml, activeCount, totalCount, recurringCount = 0) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -3864,9 +4148,9 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         flex-shrink: 0;
     }
 
-    /* Expand panel — full width below row */
+    /* Detail area below card grid */
+    .qc-detail-area { margin-top: 12px; }
     .qc-expand {
-        grid-column: 1 / -1;
         display: none;
     }
     .qc-expand.open { display: block; }
@@ -3916,8 +4200,12 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
     }
     .quest-task-label { color: #ff00ff; font-weight: bold; letter-spacing: 1px; }
     .quest-proof-type { color: #ffea00; margin-right: 5px; }
-    .quest-footer { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .quest-submit-form { display: flex; gap: 8px; flex: 1; align-items: center; }
+    .quest-footer { display: flex; flex-direction: column; gap: 10px; }
+    .quest-form-and-actions { display: flex; gap: 10px; align-items: flex-end; }
+    .quest-form-and-actions .quest-submit-form { flex: 1; }
+    .quest-form-and-actions .quest-abandon-btn { align-self: flex-end; }
+    .quest-submit-form { display: flex; flex-direction: column; gap: 8px; flex: 1; }
+    .qsf-row { display: flex; gap: 8px; align-items: center; }
     .proof-input {
         flex: 1;
         background: #1a1d26;
@@ -3929,6 +4217,35 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         text-transform: none;
     }
     .proof-input:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
+    .reflection-input {
+        flex: 1;
+        background: #1a1d26;
+        border: 1px solid #333;
+        color: #00f2ff;
+        padding: 6px 10px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+        text-transform: none;
+        resize: vertical;
+        min-height: 36px;
+        max-height: 120px;
+    }
+    .reflection-input:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
+    .time-input {
+        width: 70px;
+        background: #1a1d26;
+        border: 1px solid #ff8800;
+        color: #ff8800;
+        padding: 6px 8px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+        text-align: center;
+    }
+    .time-input:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
+    .time-group { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
+    .time-label { font-size: 0.6em; color: #ff8800; letter-spacing: 1px; white-space: nowrap; }
+    .time-row { display: flex; align-items: center; gap: 4px; }
+    .time-unit { font-size: 0.65em; color: #ff8800; letter-spacing: 1px; }
     .artifact-select {
         background: #1a1d26;
         border: 1px solid #ffea00;
@@ -3958,12 +4275,13 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         background: none;
         border: 1px solid #ff0044;
         color: #ff0044;
-        width: 28px; height: 28px;
-        font-size: 0.8em; font-weight: bold;
+        font-size: 0.75em; font-weight: bold;
         cursor: pointer;
         font-family: 'Courier New', monospace;
         transition: all 0.2s;
-        padding: 0; flex-shrink: 0;
+        padding: 6px 15px; flex-shrink: 0;
+        text-transform: uppercase;
+        letter-spacing: 1px;
     }
     .quest-abandon-btn:hover { background: #ff0044; color: #0a0b10; box-shadow: 0 0 8px rgba(255, 0, 68, 0.5); }
     .quest-date { font-size: 0.7em; color: #555; }
@@ -3986,7 +4304,10 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         <h1>Quest Board</h1>
         <div class="quest-stats">${activeCount} ACTIVE / ${totalCount} TOTAL QUESTS</div>
         <div class="qc-grid">
-        ${questRows || '<div class="no-quests" style="grid-column:1/-1">NO QUESTS YET. ADD SOME FROM THE DEFIANT PAGE.</div>'}
+        ${cardHtml || '<div class="no-quests" style="grid-column:1/-1">NO QUESTS YET. ADD SOME FROM THE DEFIANT PAGE.</div>'}
+        </div>
+        <div class="qc-detail-area">
+        ${expandHtml}
         </div>
     </div>
     <script>
@@ -3999,19 +4320,28 @@ function buildQuestBoardPage(questRows, activeCount, totalCount, recurringCount 
         if (!isOpen) {
             panel.classList.add('open');
             card.classList.add('active');
-            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 100);
+            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 100);
         }
     }
     function confirmAbandon(form) {
         return confirm('Are you sure you want to abandon this quest?');
     }
     (function() {
-        document.querySelectorAll('.proof-input').forEach(function(input) {
-            var btn = input.closest('form').querySelector('.quest-submit-btn');
-            if (!btn) return;
-            input.addEventListener('input', function() {
-                btn.disabled = input.value.trim().length === 0;
-            });
+        document.querySelectorAll('.quest-submit-form').forEach(function(form) {
+            var proof = form.querySelector('.proof-input');
+            var reflection = form.querySelector('.reflection-input');
+            var timeInput = form.querySelector('.time-input');
+            var btn = form.querySelector('.quest-submit-btn');
+            if (!proof || !btn) return;
+            function check() {
+                var hasProof = proof.value.trim().length > 0;
+                var hasReflection = reflection ? reflection.value.trim().length > 0 : true;
+                var hasTime = timeInput ? parseInt(timeInput.value) > 0 : true;
+                btn.disabled = !(hasProof && hasReflection && hasTime);
+            }
+            proof.addEventListener('input', check);
+            if (reflection) reflection.addEventListener('input', check);
+            if (timeInput) timeInput.addEventListener('input', check);
         });
     })();
     </script>
@@ -4062,11 +4392,11 @@ app.post("/quest/start", async (req, res) => {
       const today = new Date().toISOString().slice(0, 10);
       await sheets.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: "Quests!A:O",
+        range: "Quests!A:Q",
         valueInputOption: "RAW",
         insertDataOption: "INSERT_ROWS",
         requestBody: {
-          values: [[questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", "", isRecurring ? "" : (dueDate || ""), subject, isRecurring ? "X" : ""]],
+          values: [[questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", "", isRecurring ? "" : (dueDate || ""), subject, isRecurring ? "X" : "", "", ""]],
         },
       });
     }
@@ -4129,14 +4459,14 @@ app.post("/quest/start-batch", async (req, res) => {
         if (statusCol >= 0) questRows[abandonedRow - 1][statusCol] = "Active";
       } else {
         const questId = generateQuestId();
-        newRows.push([questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", "", effectiveDueDate, subject, isRecurring ? "X" : ""]);
+        newRows.push([questId, boss, minion, sector, "Active", proofType, "", taskDetail, "", today, "", "", effectiveDueDate, subject, isRecurring ? "X" : "", "", ""]);
       }
     }
 
     if (newRows.length > 0) {
       await sheets.spreadsheets.values.append({
         spreadsheetId: SPREADSHEET_ID,
-        range: "Quests!A:O",
+        range: "Quests!A:Q",
         valueInputOption: "RAW",
         insertDataOption: "INSERT_ROWS",
         requestBody: { values: newRows },
@@ -4159,7 +4489,7 @@ app.post("/quest/start-batch", async (req, res) => {
 
 app.post("/quest/submit", async (req, res) => {
   try {
-    const { questId, proofLink, artifactType } = req.body;
+    const { questId, proofLink, artifactType, reflection, timeSpent } = req.body;
     if (!questId) return res.status(400).send("Missing questId");
 
     const sheets = await getSheets();
@@ -4227,6 +4557,21 @@ app.post("/quest/submit", async (req, res) => {
       updates.push({
         range: "Quests!" + String.fromCharCode(65 + dateResolvedCol) + targetRowIdx,
         values: [[""]],
+      });
+    }
+    // Save reflection and time spent
+    const reflectionCol = headerRow.indexOf("Reflection");
+    if (reflectionCol >= 0) {
+      updates.push({
+        range: "Quests!" + String.fromCharCode(65 + reflectionCol) + targetRowIdx,
+        values: [[reflection || ""]],
+      });
+    }
+    const timeSpentCol = headerRow.indexOf("Time Spent");
+    if (timeSpentCol >= 0) {
+      updates.push({
+        range: "Quests!" + String.fromCharCode(65 + timeSpentCol) + targetRowIdx,
+        values: [[timeSpent ? String(timeSpent) : ""]],
       });
     }
 
@@ -4351,7 +4696,8 @@ app.get("/quests", async (req, res) => {
     });
 
     const isTeacher = req.cookies && req.cookies.role === "teacher";
-    let questRows = "";
+    let cardHtml = "";
+    let expandHtml = "";
     for (const q of sorted) {
       const sc = statusColors[q["Status"]] || "#555";
       const isActive = q["Status"] === "Active";
@@ -4360,7 +4706,7 @@ app.get("/quests", async (req, res) => {
       const abandonBtn = canAbandon
         ? `<form method="POST" action="/quest/remove" style="margin:0;" onsubmit="return confirmAbandon(this)">
              <input type="hidden" name="questId" value="${q["Quest ID"]}">
-             <button type="submit" class="quest-abandon-btn" title="Abandon quest">X</button>
+             <button type="submit" class="quest-abandon-btn" title="Abandon quest">ABANDON</button>
            </form>`
         : "";
 
@@ -4373,10 +4719,22 @@ app.get("/quests", async (req, res) => {
         ).join("");
         submitForm = `<form class="quest-submit-form" method="POST" action="/quest/submit">
              <input type="hidden" name="questId" value="${q["Quest ID"]}">
-             <select name="artifactType" class="artifact-select"><option value="" disabled${!currentType ? " selected" : ""}>ARTIFACT...</option>${opts}</select>
-             <input type="text" name="proofLink" placeholder="PASTE LINK OR DETAILS..." class="proof-input" required>
+             <div class="qsf-row">
+               <select name="artifactType" class="artifact-select"><option value="" disabled${!currentType ? " selected" : ""}>ARTIFACT...</option>${opts}</select>
+               <input type="text" name="proofLink" placeholder="PASTE LINK OR DETAILS..." class="proof-input" required>
+             </div>
+             <div class="qsf-row">
+               <textarea name="reflection" class="reflection-input" placeholder="WHAT DID YOU LEARN? HOW DID IT GO?" rows="2" required></textarea>
+               <div class="time-group">
+                 <label class="time-label">TIME SPENT</label>
+                 <div class="time-row"><input type="number" name="timeSpent" class="time-input" placeholder="0" min="1" max="600"><span class="time-unit">MIN</span></div>
+               </div>
+             </div>
              <button type="submit" class="quest-submit-btn" disabled>SUBMIT</button>
            </form>`;
+        if (abandonBtn) {
+          submitForm = `<div class="quest-form-and-actions">${submitForm}${abandonBtn}</div>`;
+        }
       } else {
         const proofDisplay = currentType
           ? `<span class="quest-proof-type">[${escHtml(currentType)}]</span> ${q["Proof Link"] || "---"}`
@@ -4393,8 +4751,8 @@ app.get("/quests", async (req, res) => {
       const qid = (q["Quest ID"] || "").replace(/[^A-Z0-9]/gi, "");
       const rejectBadge = isRejected ? `<span class="qc-reject-badge">!</span>` : "";
 
-      // Compact summary card
-      questRows += `
+      // Compact summary card (goes in the grid)
+      cardHtml += `
         <div class="qc-card${isOverdue ? " qc-card-overdue" : ""}" data-qid="${qid}" onclick="toggleQuest('${qid}')">
           <div class="qc-summary">
             <div class="qc-left">
@@ -4409,8 +4767,8 @@ app.get("/quests", async (req, res) => {
           </div>
         </div>`;
 
-      // Full-width expand panel below row
-      questRows += `
+      // Expand panel (goes below the grid)
+      expandHtml += `
         <div class="qc-expand" id="qe-${qid}">
           <div class="qc-expand-inner">
             <div class="qc-expand-header">
@@ -4425,7 +4783,7 @@ app.get("/quests", async (req, res) => {
             </div>
             <div class="quest-footer">
               ${submitForm}
-              ${abandonBtn}
+              ${!(isActive || isRejected) ? abandonBtn : ""}
               ${q["Date Completed"] ? '<span class="quest-date">COMPLETED: ' + q["Date Completed"] + "</span>" : ""}
             </div>
           </div>
@@ -4434,9 +4792,386 @@ app.get("/quests", async (req, res) => {
 
     const activeCount = visible.filter((q) => q["Status"] === "Active").length;
     const recurringCount = quests.filter(q => (q["Recurring"] || "").toUpperCase() === "X" && q["Status"] !== "Abandoned" && q["Status"] !== "Approved").length;
-    res.send(buildQuestBoardPage(questRows, activeCount, visible.length, recurringCount));
+    res.send(buildQuestBoardPage(cardHtml, expandHtml, activeCount, visible.length, recurringCount));
   } catch (err) {
     console.error("Quest board error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Today's Dashboard
+// ---------------------------------------------------------------------------
+const MOTIVATIONAL_QUOTES = [
+  "THE SYSTEM BENDS TO THOSE WHO PERSIST.",
+  "EVERY MINION ENSLAVED IS A STEP TOWARD DOMINION.",
+  "YOUR NEURAL PATHWAYS GROW STRONGER WITH EACH BATTLE.",
+  "KNOWLEDGE IS THE ULTIMATE WEAPON. KEEP UPGRADING.",
+  "THE SOVEREIGN DOES NOT REST. THE SOVEREIGN CONQUERS.",
+  "ERRORS ARE JUST DATA. LEARN AND RELOAD.",
+  "TODAY'S EFFORT BECOMES TOMORROW'S POWER.",
+  "ENGAGE. CONQUER. ENSLAVE. REPEAT.",
+  "THE GRID REMEMBERS EVERY VICTORY. MAKE IT COUNT.",
+  "DIFFICULTY IS THE FORGE. YOU ARE THE BLADE.",
+  "EACH QUEST COMPLETED REWIRES YOUR CIRCUITRY.",
+  "THE STRONGEST SYSTEMS ARE BUILT ONE MODULE AT A TIME.",
+];
+
+app.get("/today", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [quests, questLogs] = await Promise.all([
+      fetchQuestsData(sheets),
+      fetchQuestLogData(sheets),
+    ]);
+
+    const today = new Date().toISOString().slice(0, 10);
+    const dayName = new Date().toLocaleDateString("en-US", { weekday: "long" }).toUpperCase();
+    const dateDisplay = new Date().toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" }).toUpperCase();
+
+    // Motivational quote — rotate by day
+    const quote = MOTIVATIONAL_QUOTES[Math.floor(Date.now() / 86400000) % MOTIVATIONAL_QUOTES.length];
+
+    // 1. Active non-recurring quests sorted by due date (overdue first)
+    const activeQuests = quests.filter(q =>
+      (q["Status"] === "Active" || q["Status"] === "Rejected") &&
+      (q["Recurring"] || "").toUpperCase() !== "X"
+    );
+    const sortedActive = [...activeQuests].sort((a, b) => {
+      const da = a["Due Date"] || "";
+      const db = b["Due Date"] || "";
+      const overdueA = da && da < today ? 1 : 0;
+      const overdueB = db && db < today ? 1 : 0;
+      if (overdueA !== overdueB) return overdueB - overdueA;
+      if (da && db) return da.localeCompare(db);
+      if (da && !db) return -1;
+      if (!da && db) return 1;
+      return 0;
+    });
+
+    // 2. Recurring quests not yet logged today
+    const recurringQuests = getRecurringQuests(quests);
+    const loggedTodayIds = new Set();
+    for (const log of questLogs) {
+      if ((log["Date"] || "").slice(0, 10) === today) loggedTodayIds.add(log["Quest ID"]);
+    }
+    const unloggedRecurring = recurringQuests.filter(q => !loggedTodayIds.has(q["Quest ID"]));
+    const loggedRecurring = recurringQuests.filter(q => loggedTodayIds.has(q["Quest ID"]));
+
+    // 3. Recent completions with reflections (last 5 approved)
+    const recentCompleted = quests
+      .filter(q => q["Status"] === "Approved" && q["Date Resolved"])
+      .sort((a, b) => (b["Date Resolved"] || "").localeCompare(a["Date Resolved"] || ""))
+      .slice(0, 5);
+
+    // 4. Submitted awaiting review
+    const submitted = quests.filter(q => q["Status"] === "Submitted" && (q["Recurring"] || "").toUpperCase() !== "X");
+
+    // Build active quests HTML
+    let activeHtml = "";
+    if (sortedActive.length === 0) {
+      activeHtml = '<div class="today-empty">NO ACTIVE QUESTS. VISIT THE QUEST BOARD TO START ONE.</div>';
+    } else {
+      for (const q of sortedActive) {
+        const dueDate = q["Due Date"] || "";
+        const isOverdue = dueDate && dueDate < today;
+        const isRejected = q["Status"] === "Rejected";
+        const dueBadge = isOverdue
+          ? `<span class="today-badge today-overdue">OVERDUE ${dueDate}</span>`
+          : dueDate ? `<span class="today-badge today-due">DUE ${dueDate}</span>` : "";
+        const rejectBadge = isRejected ? `<span class="today-badge today-rejected">REJECTED</span>` : "";
+        activeHtml += `
+          <div class="today-card${isOverdue ? " today-card-overdue" : ""}">
+            <div class="today-card-top">
+              <span class="today-minion">${escHtml(q["Minion"])}</span>
+              <div class="today-badges">${rejectBadge}${dueBadge}</div>
+            </div>
+            <div class="today-card-meta">
+              <span class="today-boss">${escHtml(q["Boss"])}</span>
+              <span class="today-sector">${escHtml(q["Sector"])}</span>
+            </div>
+            ${q["Suggested By AI"] ? `<div class="today-task">${escHtml(q["Suggested By AI"])}</div>` : ""}
+          </div>`;
+      }
+    }
+
+    // Build unlogged recurring HTML
+    let recurringHtml = "";
+    if (unloggedRecurring.length === 0 && loggedRecurring.length === 0) {
+      recurringHtml = '<div class="today-empty">NO RECURRING QUESTS ACTIVE.</div>';
+    } else if (unloggedRecurring.length === 0) {
+      recurringHtml = `<div class="today-all-done">ALL ${recurringQuests.length} RECURRING QUESTS LOGGED TODAY!</div>`;
+    } else {
+      for (const q of unloggedRecurring) {
+        recurringHtml += `
+          <div class="today-card today-card-recurring">
+            <div class="today-card-top">
+              <span class="today-minion">${escHtml(q["Minion"])}</span>
+              <span class="today-badge today-unlogged">NOT LOGGED</span>
+            </div>
+            <div class="today-card-meta">
+              <span class="today-boss">${escHtml(q["Boss"])}</span>
+            </div>
+          </div>`;
+      }
+      if (loggedRecurring.length > 0) {
+        recurringHtml += `<div class="today-logged-note">${loggedRecurring.length} of ${recurringQuests.length} already logged today</div>`;
+      }
+    }
+
+    // Build submitted HTML
+    let submittedHtml = "";
+    if (submitted.length > 0) {
+      for (const q of submitted) {
+        submittedHtml += `
+          <div class="today-card today-card-submitted">
+            <div class="today-card-top">
+              <span class="today-minion">${escHtml(q["Minion"])}</span>
+              <span class="today-badge today-submitted-badge">AWAITING REVIEW</span>
+            </div>
+            <div class="today-card-meta">
+              <span class="today-boss">${escHtml(q["Boss"])}</span>
+              ${q["Date Completed"] ? `<span class="today-date">SUBMITTED ${q["Date Completed"]}</span>` : ""}
+            </div>
+          </div>`;
+      }
+    }
+
+    // Build recent completions HTML
+    let recentHtml = "";
+    if (recentCompleted.length === 0) {
+      recentHtml = '<div class="today-empty">NO COMPLETED QUESTS YET. YOUR FIRST VICTORY AWAITS.</div>';
+    } else {
+      for (const q of recentCompleted) {
+        const timeStr = q["Time Spent"] ? `${q["Time Spent"]} MIN` : "";
+        recentHtml += `
+          <div class="today-card today-card-victory">
+            <div class="today-card-top">
+              <span class="today-minion">${escHtml(q["Minion"])}</span>
+              <span class="today-date">${q["Date Resolved"] || ""}</span>
+            </div>
+            <div class="today-card-meta">
+              <span class="today-boss">${escHtml(q["Boss"])}</span>
+              ${timeStr ? `<span class="today-time">${timeStr}</span>` : ""}
+            </div>
+            ${q["Reflection"] ? `<div class="today-reflection">"${escHtml(q["Reflection"])}"</div>` : ""}
+          </div>`;
+      }
+    }
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Today - Sovereign HUD</title>
+    <style>
+    body {
+        background: #0a0b10;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        padding: 20px;
+        text-transform: uppercase;
+        overflow-x: hidden;
+    }
+    .hud-container {
+        border: 2px solid #ff8800;
+        padding: 20px;
+        box-shadow: 0 0 15px rgba(255, 136, 0, 0.5);
+        max-width: 700px;
+        margin: auto;
+    }
+    .nav-links { display: flex; gap: 10px; margin-bottom: 15px; flex-wrap: wrap; }
+    .back-link {
+        display: inline-block;
+        color: #00f2ff;
+        text-decoration: none;
+        border: 1px solid #00f2ff;
+        padding: 6px 15px;
+        font-size: 0.8em;
+        transition: all 0.2s;
+    }
+    .back-link:hover { background: #00f2ff; color: #0a0b10; }
+    h1 {
+        text-shadow: 2px 2px #ff00ff;
+        letter-spacing: 2px;
+        text-align: center;
+        margin-bottom: 2px;
+        color: #ff8800;
+        font-size: 1.4em;
+    }
+    .today-date-display {
+        text-align: center;
+        color: #888;
+        font-size: 0.8em;
+        letter-spacing: 3px;
+        margin-bottom: 20px;
+    }
+    /* Motivational quote */
+    .today-quote {
+        text-align: center;
+        padding: 15px 20px;
+        margin-bottom: 25px;
+        border: 1px solid rgba(255, 0, 255, 0.3);
+        background: rgba(255, 0, 255, 0.03);
+        position: relative;
+        overflow: hidden;
+    }
+    .today-quote-text {
+        font-size: 0.85em;
+        letter-spacing: 2px;
+        background: linear-gradient(90deg, #ff00ff, #00f2ff, #ffea00, #ff00ff);
+        background-size: 300% 100%;
+        -webkit-background-clip: text;
+        -webkit-text-fill-color: transparent;
+        background-clip: text;
+        animation: quoteShimmer 4s linear infinite;
+    }
+    @keyframes quoteShimmer {
+        0% { background-position: 0% 50%; }
+        100% { background-position: 300% 50%; }
+    }
+    /* Section headers */
+    .today-section {
+        margin-bottom: 20px;
+    }
+    .today-section-header {
+        font-size: 0.85em;
+        font-weight: bold;
+        letter-spacing: 3px;
+        margin-bottom: 10px;
+        padding-bottom: 6px;
+        display: flex;
+        align-items: center;
+        gap: 8px;
+    }
+    .today-section-header::after {
+        content: '';
+        flex: 1;
+        height: 1px;
+    }
+    .section-ops .today-section-header { color: #ff8800; border-bottom: 1px solid rgba(255, 136, 0, 0.3); }
+    .section-ops .today-section-header::after { background: linear-gradient(90deg, rgba(255, 136, 0, 0.3), transparent); }
+    .section-recurring .today-section-header { color: #00f2ff; border-bottom: 1px solid rgba(0, 242, 255, 0.3); }
+    .section-recurring .today-section-header::after { background: linear-gradient(90deg, rgba(0, 242, 255, 0.3), transparent); }
+    .section-submitted .today-section-header { color: #ffea00; border-bottom: 1px solid rgba(255, 234, 0, 0.3); }
+    .section-submitted .today-section-header::after { background: linear-gradient(90deg, rgba(255, 234, 0, 0.3), transparent); }
+    .section-victories .today-section-header { color: #00ff9d; border-bottom: 1px solid rgba(0, 255, 157, 0.3); }
+    .section-victories .today-section-header::after { background: linear-gradient(90deg, rgba(0, 255, 157, 0.3), transparent); }
+    .section-count { font-size: 0.9em; opacity: 0.7; }
+    /* Cards */
+    .today-card {
+        border: 1px solid rgba(255, 136, 0, 0.2);
+        background: rgba(255, 136, 0, 0.02);
+        padding: 10px 12px;
+        margin-bottom: 6px;
+        border-radius: 4px;
+        transition: border-color 0.2s;
+    }
+    .today-card:hover { border-color: rgba(255, 136, 0, 0.5); }
+    .today-card-overdue { border-color: rgba(255, 0, 68, 0.4); background: rgba(255, 0, 68, 0.03); }
+    .today-card-recurring { border-color: rgba(0, 242, 255, 0.2); background: rgba(0, 242, 255, 0.02); }
+    .today-card-recurring:hover { border-color: rgba(0, 242, 255, 0.5); }
+    .today-card-submitted { border-color: rgba(255, 234, 0, 0.2); background: rgba(255, 234, 0, 0.02); }
+    .today-card-victory { border-color: rgba(0, 255, 157, 0.2); background: rgba(0, 255, 157, 0.02); }
+    .today-card-victory:hover { border-color: rgba(0, 255, 157, 0.5); }
+    .today-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+    .today-minion { font-weight: bold; letter-spacing: 1px; font-size: 0.85em; }
+    .today-badges { display: flex; gap: 6px; flex-shrink: 0; }
+    .today-badge {
+        font-size: 0.6em;
+        padding: 2px 6px;
+        letter-spacing: 1px;
+        border: 1px solid;
+    }
+    .today-overdue { color: #ff0044; border-color: #ff0044; }
+    .today-due { color: #ff8800; border-color: #ff8800; }
+    .today-rejected { color: #ff0044; border-color: #ff0044; }
+    .today-unlogged { color: #00f2ff; border-color: #00f2ff; animation: unloggedPulse 2s ease-in-out infinite; }
+    @keyframes unloggedPulse {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.5; }
+    }
+    .today-submitted-badge { color: #ffea00; border-color: #ffea00; }
+    .today-card-meta {
+        display: flex; gap: 12px; margin-top: 4px;
+        font-size: 0.7em; color: #888; letter-spacing: 1px;
+    }
+    .today-boss { color: #ff00ff; }
+    .today-sector { color: #555; }
+    .today-date { color: #555; font-size: 0.7em; letter-spacing: 1px; }
+    .today-time { color: #ff8800; font-weight: bold; }
+    .today-task {
+        font-size: 0.75em;
+        color: #aaa;
+        margin-top: 6px;
+        text-transform: none;
+        border-left: 2px solid #ff00ff;
+        padding-left: 8px;
+    }
+    .today-reflection {
+        font-size: 0.75em;
+        color: #00f2ff;
+        margin-top: 6px;
+        text-transform: none;
+        font-style: italic;
+        border-left: 2px solid #00ff9d;
+        padding-left: 8px;
+    }
+    .today-empty { color: #555; font-size: 0.8em; padding: 15px 0; text-align: center; }
+    .today-all-done {
+        color: #00ff9d;
+        font-size: 0.85em;
+        padding: 15px 0;
+        text-align: center;
+        text-shadow: 0 0 8px rgba(0, 255, 157, 0.3);
+    }
+    .today-logged-note { color: #555; font-size: 0.7em; text-align: center; margin-top: 8px; letter-spacing: 1px; }
+    @media (max-width: 600px) {
+        body { padding: 10px; }
+        .hud-container { padding: 12px; }
+        h1 { font-size: 1.1em; }
+        .today-quote { padding: 10px; }
+        .today-quote-text { font-size: 0.75em; letter-spacing: 1px; }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <div class="nav-links">
+            <a class="back-link" href="/">&lt; HUD</a>
+            <a class="back-link" href="/quests">QUESTS</a>
+            <a class="back-link" href="/recurring">RECURRING</a>
+        </div>
+        <h1>MISSION BRIEFING</h1>
+        <div class="today-date-display">${dayName} // ${dateDisplay}</div>
+        <div class="today-quote">
+            <div class="today-quote-text">${quote}</div>
+        </div>
+        ${sortedActive.length > 0 || submitted.length > 0 ? `
+        <div class="today-section section-ops">
+            <div class="today-section-header">ACTIVE OPERATIONS <span class="section-count">(${sortedActive.length})</span></div>
+            ${activeHtml}
+        </div>` : ""}
+        ${recurringQuests.length > 0 ? `
+        <div class="today-section section-recurring">
+            <div class="today-section-header">RECURRING DRILLS <span class="section-count">(${unloggedRecurring.length} remaining)</span></div>
+            ${recurringHtml}
+        </div>` : ""}
+        ${submitted.length > 0 ? `
+        <div class="today-section section-submitted">
+            <div class="today-section-header">AWAITING REVIEW <span class="section-count">(${submitted.length})</span></div>
+            ${submittedHtml}
+        </div>` : ""}
+        <div class="today-section section-victories">
+            <div class="today-section-header">RECENT VICTORIES <span class="section-count">(${recentCompleted.length})</span></div>
+            ${recentHtml}
+        </div>
+    </div>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("Today page error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
   }
 });
@@ -4445,7 +5180,7 @@ app.get("/quests", async (req, res) => {
 // Recurring Quest Page + Routes
 // ---------------------------------------------------------------------------
 
-function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
+function buildRecurringPage(cardHtml, expandHtml, totalCount, loggedCount, isTeacher) {
   return `<!DOCTYPE html>
 <html>
 <head>
@@ -4569,9 +5304,9 @@ function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
         flex-shrink: 0;
     }
 
-    /* Expand panel */
+    /* Detail area below card grid */
+    .rc-detail-area { margin-top: 12px; }
     .rc-expand {
-        grid-column: 1 / -1;
         display: none;
         min-width: 0;
         overflow: hidden;
@@ -4650,11 +5385,20 @@ function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
         margin-bottom: 4px; text-transform: none;
     }
     .rq-log-date { color: #ff8800; margin-right: 8px; }
+    .rq-log-time { color: #ff8800; margin-left: 8px; font-weight: bold; }
+    .rq-log-time-edit { color: #555; cursor: pointer; margin-left: 4px; font-size: 0.9em; }
+    .rq-log-time-edit:hover { color: #ffea00; }
+    .rq-log-time-form { display: inline; margin-left: 4px; }
+    .rq-log-time-input { width: 45px; padding: 2px 4px; background: #1a1d26; border: 1px solid #ff8800; color: #ff8800; font-family: 'Courier New', monospace; font-size: 0.9em; text-align: center; }
+    .rq-log-time-save { background: none; border: 1px solid #00ff9d; color: #00ff9d; cursor: pointer; padding: 1px 6px; font-size: 0.9em; margin-left: 2px; }
+    .rq-log-time-save:hover { background: #00ff9d; color: #0a0b10; }
     .rq-log-author { color: #555; margin-left: 6px; }
     .rq-log-empty { font-size: 0.7em; color: #555; font-style: italic; text-transform: none; }
     .rq-log-form {
-        display: flex; gap: 8px; margin-top: 10px;
-        align-items: flex-end; flex-wrap: wrap;
+        display: flex; flex-direction: column; gap: 8px; margin-top: 10px;
+    }
+    .rq-log-row {
+        display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;
     }
     .rq-log-form input[type="date"] {
         background: #1a1d26; border: 1px solid #ff8800; color: #ff8800;
@@ -4673,7 +5417,23 @@ function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
         padding: 6px 15px; font-family: 'Courier New', monospace; font-size: 0.75em;
         cursor: pointer; text-transform: uppercase; transition: all 0.2s; white-space: nowrap;
     }
-    .rq-log-btn:hover { background: #00f2ff; color: #0a0b10; }
+    .rq-log-btn:hover:not(:disabled) { background: #00f2ff; color: #0a0b10; }
+    .rq-log-btn:disabled { border-color: #444; color: #555; cursor: not-allowed; opacity: 0.5; }
+    .rq-log-hint { font-size: 0.6em; color: #555; letter-spacing: 1px; text-align: right; }
+    .rq-time-input {
+        width: 70px; background: #1a1d26; border: 1px solid #ff8800; color: #ff8800;
+        padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em; text-align: center;
+    }
+    .rq-time-input:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
+    .time-group { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
+    .time-label { font-size: 0.6em; color: #ff8800; letter-spacing: 1px; white-space: nowrap; }
+    .time-row { display: flex; align-items: center; gap: 4px; }
+    .time-unit { font-size: 0.65em; color: #ff8800; letter-spacing: 1px; }
+    .time-input {
+        width: 70px; background: #1a1d26; border: 1px solid #ff8800; color: #ff8800;
+        padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em; text-align: center;
+    }
+    .time-input:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
     .rq-complete-form { margin-top: 12px; text-align: right; }
     .rq-complete-btn {
         background: none; border: 1px solid #00ff9d; color: #00ff9d;
@@ -4705,7 +5465,10 @@ function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
         <h1>Recurring Quests</h1>
         <div class="quest-stats"><span>${loggedCount}</span> LOGGED TODAY / <span>${totalCount}</span> TOTAL</div>
         <div class="rc-grid">
-        ${questCards || '<div class="no-quests" style="grid-column:1/-1">NO RECURRING QUESTS. MARK A MINION AS RECURRING TO GET STARTED.</div>'}
+        ${cardHtml || '<div class="no-quests" style="grid-column:1/-1">NO RECURRING QUESTS. MARK A MINION AS RECURRING TO GET STARTED.</div>'}
+        </div>
+        <div class="rc-detail-area">
+        ${expandHtml}
         </div>
     </div>
     <script>
@@ -4718,15 +5481,52 @@ function buildRecurringPage(questCards, totalCount, loggedCount, isTeacher) {
         if (!isOpen) {
             panel.classList.add('open');
             card.classList.add('active');
-            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 100);
+            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 100);
         }
     }
     function confirmComplete(form) {
-        return confirm('Submit this recurring quest for teacher review?');
+        return confirm('Are you completely finished with this book? This will submit it for final teacher review and you will no longer log daily updates.');
     }
     function confirmAbandon(form) {
         return confirm('Abandon this recurring quest?');
     }
+    function toggleLogTimeEdit(pencil) {
+        var entry = pencil.parentElement;
+        var formSpan = entry.querySelector('.rq-log-time-form');
+        if (!formSpan) return;
+        var showing = formSpan.style.display !== 'none';
+        formSpan.style.display = showing ? 'none' : 'inline';
+        if (!showing) formSpan.querySelector('.rq-log-time-input').focus();
+    }
+    function saveLogTime(btn, questId, date) {
+        var input = btn.previousElementSibling;
+        var newTime = input.value;
+        fetch('/admin/recurring/update-log-time', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ questId: questId, date: date, timeSpent: newTime })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.success) { location.reload(); }
+            else { alert('Error: ' + (data.error || 'Unknown')); }
+        }).catch(function(e) { alert('Error saving: ' + e.message); });
+    }
+    (function() {
+        document.querySelectorAll('.rq-log-form').forEach(function(form) {
+            var note = form.querySelector('.rq-note');
+            var time = form.querySelector('.rq-time');
+            var btn = form.querySelector('.rq-log-btn');
+            var hint = form.querySelector('.rq-log-hint');
+            if (!note || !time || !btn) return;
+            function check() {
+                var hasNote = note.value.trim().length > 0;
+                var hasTime = parseInt(time.value) > 0;
+                btn.disabled = !(hasNote && hasTime);
+                if (hint) hint.style.display = (hasNote && hasTime) ? 'none' : '';
+            }
+            note.addEventListener('input', check);
+            time.addEventListener('input', check);
+        });
+    })();
     </script>
 </body>
 </html>`;
@@ -4786,7 +5586,10 @@ app.get("/recurring", async (req, res) => {
       let logEntries = "";
       if (recent.length > 0) {
         for (const log of recent) {
-          logEntries += `<div class="rq-log-entry"><span class="rq-log-date">${escHtml(log["Date"] || "")}</span>${escHtml(log["Note"] || "")}<span class="rq-log-author">${escHtml(log["Author"] || "")}</span></div>`;
+          const logTime = log["Time Spent"] || "";
+          const timeDisplay = logTime ? `<span class="rq-log-time">${escHtml(logTime)}m</span>` : "";
+          const timeEdit = isTeacher ? `<span class="rq-log-time-edit" onclick="toggleLogTimeEdit(this)" title="Edit time spent">&#x270E;</span><span class="rq-log-time-form" style="display:none;"><input type="number" class="rq-log-time-input" value="${escHtml(logTime)}" min="0" max="600" placeholder="0"><button class="rq-log-time-save" onclick="saveLogTime(this,'${escHtml(qid)}','${escHtml(log["Date"] || "")}')">&#x2713;</button></span>` : "";
+          logEntries += `<div class="rq-log-entry"><span class="rq-log-date">${escHtml(log["Date"] || "")}</span>${escHtml(log["Note"] || "")}${timeDisplay}${timeEdit}<span class="rq-log-author">${escHtml(log["Author"] || "")}</span></div>`;
         }
         if (logs.length > 3) {
           logEntries += `<div class="rq-log-entry" style="color:#555;font-style:italic;">+ ${logs.length - 3} more entries</div>`;
@@ -4797,9 +5600,18 @@ app.get("/recurring", async (req, res) => {
 
       const logForm = `<form class="rq-log-form" method="POST" action="/recurring/log">
             <input type="hidden" name="questId" value="${qid}">
-            <input type="date" name="date" value="${today}">
-            <textarea name="note" placeholder="What did you do today?" required></textarea>
-            <button type="submit" class="rq-log-btn">LOG UPDATE</button>
+            <div class="rq-log-row">
+              <input type="date" name="date" value="${today}">
+              <textarea name="note" class="rq-note" placeholder="What did you do today?" required></textarea>
+            </div>
+            <div class="rq-log-row">
+              <div class="time-group">
+                <label class="time-label">TIME SPENT</label>
+                <div class="time-row"><input type="number" name="timeSpent" class="time-input rq-time" placeholder="0" min="1" max="600" required><span class="time-unit">MIN</span></div>
+              </div>
+              <button type="submit" class="rq-log-btn" disabled>LOG UPDATE</button>
+            </div>
+            <div class="rq-log-hint">Fill in what you did and time spent to log</div>
           </form>`;
 
       const isActive = q["Status"] === "Active" || q["Status"] === "Rejected";
@@ -4815,7 +5627,7 @@ app.get("/recurring", async (req, res) => {
         if (isActive) {
           actionControls += `<form method="POST" action="/recurring/complete" onsubmit="return confirmComplete(this)" style="margin:0;">
                 <input type="hidden" name="questId" value="${qid}">
-                <button type="submit" class="rq-complete-btn">SUBMIT FOR REVIEW</button>
+                <button type="submit" class="rq-complete-btn">BOOK FINISHED — SUBMIT FOR FINAL REVIEW</button>
               </form>`;
         }
         actionControls += `</div>`;
@@ -4826,7 +5638,7 @@ app.get("/recurring", async (req, res) => {
         : "";
 
       // Compact summary card
-      let html = `
+      const card = `
         <div class="rc-card${hasLogToday ? " rc-card-logged" : ""}" data-rid="${safeQid}" onclick="toggleRecurring('${safeQid}')">
           <div class="rc-summary">
             <div class="rc-left">
@@ -4841,8 +5653,8 @@ app.get("/recurring", async (req, res) => {
           </div>
         </div>`;
 
-      // Full-width expand panel
-      html += `
+      // Expand panel (rendered below all cards)
+      const expand = `
         <div class="rc-expand" id="re-${safeQid}">
           <div class="rc-expand-inner">
             <div class="rc-expand-header">
@@ -4864,17 +5676,26 @@ app.get("/recurring", async (req, res) => {
           </div>
         </div>`;
 
-      return html;
+      return { card, expand };
     }
 
-    let questCards = "";
-    for (const q of notLoggedToday) questCards += buildCard(q);
+    let cardHtml = "";
+    let expandHtml = "";
+    for (const q of notLoggedToday) {
+      const result = buildCard(q);
+      cardHtml += result.card;
+      expandHtml += result.expand;
+    }
     if (notLoggedToday.length > 0 && loggedToday.length > 0) {
-      questCards += `<div class="rc-separator"><span>\u2713 LOGGED TODAY (${loggedToday.length})</span></div>`;
+      cardHtml += `<div class="rc-separator"><span>\u2713 LOGGED TODAY (${loggedToday.length})</span></div>`;
     }
-    for (const q of loggedToday) questCards += buildCard(q);
+    for (const q of loggedToday) {
+      const result = buildCard(q);
+      cardHtml += result.card;
+      expandHtml += result.expand;
+    }
 
-    res.send(buildRecurringPage(questCards, recurring.length, loggedCount, isTeacher));
+    res.send(buildRecurringPage(cardHtml, expandHtml, recurring.length, loggedCount, isTeacher));
   } catch (err) {
     console.error("Recurring quest page error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
@@ -4883,7 +5704,7 @@ app.get("/recurring", async (req, res) => {
 
 app.post("/recurring/log", async (req, res) => {
   try {
-    const { questId, date, note } = req.body;
+    const { questId, date, note, timeSpent } = req.body;
     if (!questId || !note) {
       return res.status(400).send("Quest ID and note are required.");
     }
@@ -4894,16 +5715,71 @@ app.post("/recurring/log", async (req, res) => {
     await ensureQuestLogSheet(sheets);
     await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
-      range: "Quest_Log!A:D",
+      range: "Quest_Log!A:E",
       valueInputOption: "RAW",
       insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [[questId, logDate, note, author]] },
+      requestBody: { values: [[questId, logDate, note, author, timeSpent || ""]] },
     });
 
     res.redirect("/recurring");
   } catch (err) {
     console.error("Recurring log error:", err);
     res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+// Teacher: update time spent on a recurring log entry
+app.post("/admin/recurring/update-log-time", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { questId, date, timeSpent } = req.body;
+    if (!questId || !date) {
+      return res.status(400).json({ error: "Quest ID and date are required" });
+    }
+
+    const sheets = await getSheets();
+    const logRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quest_Log",
+    });
+    const rows = logRes.data.values;
+    if (!rows || rows.length < 2) {
+      return res.status(404).json({ error: "No log entries found" });
+    }
+
+    const headers = rows[0];
+    const idCol = headers.indexOf("Quest ID");
+    const dateCol = headers.indexOf("Date");
+    const timeCol = headers.indexOf("Time Spent");
+    if (timeCol < 0) {
+      return res.status(500).json({ error: "Time Spent column not found" });
+    }
+
+    const colRef = String.fromCharCode(65 + timeCol);
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][idCol] === questId && (rows[i][dateCol] || "").slice(0, 10) === date.slice(0, 10)) {
+        targetRow = i + 1; // 1-based
+        break;
+      }
+    }
+    if (targetRow === -1) {
+      return res.status(404).json({ error: "Log entry not found" });
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Quest_Log!${colRef}${targetRow}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[timeSpent || ""]] },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Update log time error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -5367,7 +6243,9 @@ app.get("/army", async (req, res) => {
     }
     @media (max-width: 600px) {
         body { padding: 10px; }
-        .hud-container { padding: 15px; }
+        .hud-container { padding: 10px; }
+        .army-sector { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        h1 { font-size: 1.2em; }
     }
     </style>
 </head>
@@ -5484,7 +6362,7 @@ app.get("/defiant", async (req, res) => {
 
         let questBtn;
         if (onQuest) {
-          questBtn = `<span style="color:#ff4444;text-shadow:0 0 6px #ff4444;" title="On quest board">&#x2665;</span>`;
+          questBtn = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
         } else if (m["Status"] === "Engaged") {
           questBtn = `<input type="checkbox" class="quest-chk" data-boss="${escHtml(m["Boss"])}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''} title="Select for quest board">`;
         } else {
@@ -5628,8 +6506,17 @@ app.get("/defiant", async (req, res) => {
     }
     .batch-submit:hover { background: #ffea00; box-shadow: 0 0 12px rgba(255,234,0,0.4); }
     @media (max-width: 600px) {
-        body { padding: 10px; }
-        .hud-container { padding: 15px; }
+        body { padding: 10px; padding-bottom: 100px; }
+        .hud-container { padding: 10px; }
+        .defiant-sector { overflow-x: auto; -webkit-overflow-scrolling: touch; padding: 10px; }
+        table { font-size: 0.7em; min-width: 520px; }
+        th, td { padding: 5px 3px; white-space: nowrap; }
+        h1 { font-size: 1.2em; }
+        .quest-batch-bar {
+            flex-wrap: wrap; justify-content: center; gap: 8px;
+            padding: 10px 15px calc(10px + env(safe-area-inset-bottom, 0px)) 15px;
+        }
+        .batch-submit { width: 100%; padding: 12px 18px; font-size: 0.9em; }
     }
     </style>
 </head>
@@ -6790,6 +7677,7 @@ function buildAdminPage(pendingCount) {
   const functions = [
     { id: "quests", title: questTitle, desc: pendingCount > 0 ? `${pendingCount} quest${pendingCount > 1 ? "s" : ""} awaiting approval.` : "No quests pending. Check back later.", href: "/admin/quests", active: true },
     { id: "manual", title: "MANUAL ENTRY", desc: "Add new objectives (minions) directly without opening Google Sheets.", href: "/admin/manual", active: true },
+    { id: "curriculum", title: "CURRICULUM PLANNER", desc: "Browse and assign objectives by sector. Edit tasks and batch-add to quest board.", href: "/admin/curriculum", active: true },
     { id: "locks", title: "LOCK/UNLOCK", desc: "Manage prerequisites and locked objectives.", href: "/admin/locks", active: true },
     { id: "import", title: "PHOTO IMPORT", desc: "Upload lesson photos for AI classification and auto-import to the tracker.", href: "/admin/import", active: true },
     { id: "notes", title: "TEACHER NOTES", desc: "Leave notes, observations, and communication for other teachers.", href: "/admin/notes", active: true },
@@ -6983,12 +7871,14 @@ app.get("/admin/quests", async (req, res) => {
             <form method="POST" action="/admin/quests/approve" style="display:inline;">
               <input type="hidden" name="questId" value="${escHtml(q["Quest ID"])}">
               <input type="hidden" name="feedback" value="">
-              <button type="submit" class="qa-btn qa-approve" onclick="this.form.feedback.value=document.getElementById('fb-${escHtml(q["Quest ID"])}').value;return confirm('Approve this quest? The minion will be marked as Enslaved.')">&#x2713; APPROVE</button>
+              <input type="hidden" name="timeSpent" value="">
+              <button type="submit" class="qa-btn qa-approve" onclick="this.form.feedback.value=document.getElementById('fb-${escHtml(q["Quest ID"])}').value;this.form.timeSpent.value=document.getElementById('ts-${escHtml(q["Quest ID"])}').value;return confirm('Approve this quest? The minion will be marked as Enslaved.')">&#x2713; APPROVE</button>
             </form>
             <form method="POST" action="/admin/quests/reject" style="display:inline;">
               <input type="hidden" name="questId" value="${escHtml(q["Quest ID"])}">
               <input type="hidden" name="feedback" value="">
-              <button type="submit" class="qa-btn qa-reject" onclick="this.form.feedback.value=document.getElementById('fb-${escHtml(q["Quest ID"])}').value;return confirm('Reject this quest? Henry will need to re-submit.')">&#x2717; REJECT</button>
+              <input type="hidden" name="timeSpent" value="">
+              <button type="submit" class="qa-btn qa-reject" onclick="this.form.feedback.value=document.getElementById('fb-${escHtml(q["Quest ID"])}').value;this.form.timeSpent.value=document.getElementById('ts-${escHtml(q["Quest ID"])}').value;return confirm('Reject this quest? Henry will need to re-submit.')">&#x2717; REJECT</button>
             </form>
           </div>`;
 
@@ -7010,6 +7900,12 @@ app.get("/admin/quests", async (req, res) => {
             <span class="qa-proof-label">PROOF:</span>
             ${q["Proof Type"] ? '<span class="qa-proof-type">[' + escHtml(q["Proof Type"]) + ']</span>' : ''}
             ${proofDisplay}
+          </div>
+          ${q["Reflection"] ? '<div class="qa-reflection"><span class="qa-reflection-label">REFLECTION:</span> ' + escHtml(q["Reflection"]) + '</div>' : ''}
+          <div class="qa-time-row">
+            <span class="qa-time-label">TIME SPENT:</span>
+            <input type="number" id="ts-${escHtml(q["Quest ID"])}" class="qa-time-input" value="${escHtml(q["Time Spent"] || "")}" min="0" max="600" placeholder="0">
+            <span class="qa-time-unit">MIN</span>
           </div>
           ${q["Date Completed"] ? '<div class="qa-date">DATE: ' + q["Date Completed"] + '</div>' : ''}
           ${actions}
@@ -7047,6 +7943,13 @@ app.get("/admin/quests", async (req, res) => {
     .qa-proof { font-size: 0.8em; color: #aaa; margin-bottom: 6px; text-transform: none; }
     .qa-proof-label { color: #ffea00; font-weight: bold; }
     .qa-proof-type { color: #ffea00; margin: 0 4px; }
+    .qa-reflection { font-size: 0.8em; color: #00f2ff; margin-bottom: 6px; text-transform: none; border-left: 2px solid #00f2ff; padding-left: 10px; font-style: italic; }
+    .qa-reflection-label { color: #00f2ff; font-weight: bold; font-style: normal; }
+    .qa-time-row { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+    .qa-time-label { font-size: 0.75em; color: #ff8800; letter-spacing: 1px; font-weight: bold; }
+    .qa-time-input { width: 60px; padding: 4px 6px; background: rgba(255,136,0,0.08); border: 1px solid #ff8800; color: #ff8800; font-family: 'Courier New', monospace; font-size: 0.8em; text-align: center; }
+    .qa-time-input:focus { outline: none; box-shadow: 0 0 6px rgba(255,136,0,0.4); }
+    .qa-time-unit { font-size: 0.7em; color: #ff8800; letter-spacing: 1px; }
     .qa-date { font-size: 0.7em; color: #555; margin-bottom: 8px; }
     .qa-actions { margin-top: 10px; display: flex; gap: 10px; }
     .qa-btn {
@@ -7208,6 +8111,7 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
   const dateAddedCol = headers.indexOf("Date Added");
   const dateResolvedCol = headers.indexOf("Date Resolved");
   const feedbackCol = headers.indexOf("Feedback");
+  const timeSpentCol = headers.indexOf("Time Spent");
   const colRef = (col) => String.fromCharCode(65 + col);
 
   let targetRowIdx = -1;
@@ -7255,6 +8159,14 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
     updates.push({
       range: "Quests!" + colRef(feedbackCol) + targetRowIdx,
       values: [[feedback]],
+    });
+  }
+
+  // Write teacher-updated time spent (if provided)
+  if (timeSpentCol >= 0 && req.body.timeSpent !== undefined && req.body.timeSpent !== "") {
+    updates.push({
+      range: "Quests!" + colRef(timeSpentCol) + targetRowIdx,
+      values: [[req.body.timeSpent]],
     });
   }
 
@@ -8144,7 +9056,7 @@ app.get("/admin/manual", async (req, res) => {
     const successMsg = addedCount > 0
       ? `<div class="success-msg">&#x2714; ${addedCount} MINION${addedCount > 1 ? "S" : ""} ADDED SUCCESSFULLY!</div>` : "";
     const addedToQuest = req.query.quest === "1"
-      ? `<div class="success-msg" style="color:#ff6600;">&#x2665; ALSO ADDED TO QUEST BOARD</div>` : "";
+      ? `<div class="success-msg" style="color:#ff6600;">&#x2605; ALSO ADDED TO QUEST BOARD</div>` : "";
 
     res.send(`<!DOCTYPE html>
 <html>
@@ -8743,14 +9655,14 @@ app.post("/admin/manual", async (req, res) => {
             if (statusCol >= 0) existingQuestRows[abandonedRow - 1][statusCol] = "Active";
           } else {
             const questId = generateQuestId();
-            newQuestRows.push([questId, boss, er.minionName, sector, "Active", proofType, "", taskDetail, "", today, "", "", effectiveDueDate, subject || "", isRecurring ? "X" : ""]);
+            newQuestRows.push([questId, boss, er.minionName, sector, "Active", proofType, "", taskDetail, "", today, "", "", effectiveDueDate, subject || "", isRecurring ? "X" : "", "", ""]);
           }
         }
 
         if (newQuestRows.length > 0) {
           await sheets.spreadsheets.values.append({
             spreadsheetId: SPREADSHEET_ID,
-            range: "Quests!A:O",
+            range: "Quests!A:Q",
             valueInputOption: "RAW",
             insertDataOption: "INSERT_ROWS",
             requestBody: { values: newQuestRows },
@@ -8766,12 +9678,544 @@ app.post("/admin/manual", async (req, res) => {
 
     if (questAdded && recurring === "1") {
       res.redirect("/recurring");
+    } else if (req.body.redirect) {
+      res.redirect(req.body.redirect + `?success=${rows.length}${questAdded ? '&quest=1' : ''}`);
     } else {
       res.redirect(`/admin/manual?success=${rows.length}${questAdded ? '&quest=1' : ''}`);
     }
   } catch (err) {
     console.error("Manual entry error:", err);
     res.status(500).send(`<pre style="color:red">Error adding minion(s): ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Curriculum Planner
+// ---------------------------------------------------------------------------
+app.get("/admin/curriculum", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [sectorsRes, questsData] = await Promise.all([
+      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Sectors" }),
+      fetchQuestsData(sheets),
+    ]);
+    const sectors = parseTable(sectorsRes.data.values);
+    const recCol = findRecurringCol(sectors);
+
+    // Active quest keys
+    const activeQuestKeys = new Set();
+    for (const q of questsData.filter(q => q["Status"] === "Active" || q["Status"] === "Submitted")) {
+      activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
+    }
+
+    // Enslaved keys
+    const enslavedKeys = new Set();
+    for (const m of sectors) {
+      if (m["Status"] === "Enslaved") enslavedKeys.add(m["Boss"] + "|" + m["Minion"]);
+    }
+
+    // Build hierarchy: sector → boss → minions
+    const hierarchy = {};
+    const allSectors = new Set();
+    for (const m of sectors) {
+      const sec = m["Sector"] || "Unknown";
+      const boss = m["Boss"] || "Unknown";
+      allSectors.add(sec);
+      if (!hierarchy[sec]) hierarchy[sec] = {};
+      if (!hierarchy[sec][boss]) hierarchy[sec][boss] = [];
+      hierarchy[sec][boss].push(m);
+    }
+
+    // Collect existing subjects/sectors/bosses for the add-new form
+    const existingSubjects = new Set();
+    const sectorBossMap = {};
+    for (const m of sectors) {
+      if (m["Subject"]) existingSubjects.add(m["Subject"]);
+      const sec = m["Sector"] || "Unknown";
+      const boss = m["Boss"] || "Unknown";
+      if (!sectorBossMap[sec]) sectorBossMap[sec] = new Set();
+      sectorBossMap[sec].add(boss);
+    }
+    const sectorData = {};
+    for (const [sec, bosses] of Object.entries(sectorBossMap)) {
+      sectorData[sec] = Array.from(bosses).sort();
+    }
+
+    const heartSvgIcon = `<svg width="12" height="10" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:2px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
+
+    // Build sections
+    let sectionsHtml = "";
+    const sortedSectors = Object.keys(hierarchy).sort();
+    for (const sector of sortedSectors) {
+      const bosses = hierarchy[sector];
+      let bossesHtml = "";
+      for (const boss of Object.keys(bosses).sort()) {
+        const minions = bosses[boss];
+        let rows = "";
+        for (const m of minions) {
+          const qKey = m["Boss"] + "|" + m["Minion"];
+          const onQuest = activeQuestKeys.has(qKey);
+          const isEnslaved = m["Status"] === "Enslaved";
+          const isRec = recCol && (m[recCol] || "").toUpperCase() === "X";
+          const statusColor = { Engaged: "#ff6600", Locked: "#555", Enslaved: "#00ff9d" };
+          const sc = statusColor[m["Status"]] || "#555";
+
+          let checkCell;
+          if (onQuest) {
+            checkCell = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
+          } else if (isEnslaved) {
+            checkCell = `<span style="color:#00ff9d;" title="Enslaved">&#x2713;</span>`;
+          } else if (m["Status"] === "Engaged") {
+            checkCell = `<input type="checkbox" class="cur-chk" data-boss="${escHtml(m["Boss"])}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''}>`;
+          } else {
+            checkCell = `<span style="opacity:0.2;">-</span>`;
+          }
+
+          const taskVal = escHtml(m["Task"] || "");
+          const safeId = escHtml(sector + "|" + boss + "|" + m["Minion"]).replace(/[^a-zA-Z0-9]/g, "_");
+          const taskCell = `<span class="cur-task-display" id="td-${safeId}">${taskVal || '<span style="color:#555;font-style:italic;">No task</span>'}</span><input type="text" class="cur-task-input" id="ti-${safeId}" value="${taskVal}" style="display:none;" data-sector="${escHtml(sector)}" data-boss="${escHtml(boss)}" data-minion="${escHtml(m["Minion"])}"><span class="cur-task-edit" onclick="toggleTaskEdit('${safeId}')" title="Edit task">&#x270E;</span><button class="cur-task-save" id="ts-${safeId}" onclick="saveTask('${safeId}')" style="display:none;">&#x2713;</button>`;
+
+          const recTag = isRec ? `<span class="cur-rec-tag">REC</span>` : "";
+
+          rows += `<tr class="${isEnslaved ? 'cur-enslaved' : ''}">
+            <td>${checkCell}</td>
+            <td>${escHtml(m["Minion"])}${recTag}</td>
+            <td class="cur-task-cell">${taskCell}</td>
+            <td style="color:${sc};font-weight:bold;">${m["Status"]}</td>
+            <td>${m["Impact(1-3)"] || ""}</td>
+          </tr>`;
+        }
+
+        const engaged = minions.filter(m => m["Status"] === "Engaged").length;
+        const enslaved = minions.filter(m => m["Status"] === "Enslaved").length;
+        const total = minions.length;
+
+        bossesHtml += `
+          <div class="cur-boss-section">
+            <div class="cur-boss-header">${heartSvgIcon} ${escHtml(boss)} <span class="cur-boss-count">(${enslaved}/${total} enslaved, ${engaged} engaged)</span></div>
+            <table class="cur-table">
+              <thead><tr><th></th><th>Minion</th><th>Task</th><th>Status</th><th>Imp</th></tr></thead>
+              <tbody>${rows}</tbody>
+            </table>
+          </div>`;
+      }
+
+      const sectorMinions = Object.values(bosses).flat();
+      const sectorEnslaved = sectorMinions.filter(m => m["Status"] === "Enslaved").length;
+      const sectorTotal = sectorMinions.length;
+      const pct = sectorTotal > 0 ? Math.round(sectorEnslaved / sectorTotal * 100) : 0;
+
+      sectionsHtml += `
+        <div class="cur-sector" data-sector="${escHtml(sector)}">
+          <h2 class="cur-sector-title">${escHtml(sector)} <span class="cur-sector-pct">${pct}% CONQUERED (${sectorEnslaved}/${sectorTotal})</span></h2>
+          ${bossesHtml}
+        </div>`;
+    }
+
+    // Sector filter buttons
+    let filterBtns = `<button class="cur-filter active" onclick="filterSector('ALL')">ALL</button>`;
+    for (const sec of sortedSectors) {
+      filterBtns += `<button class="cur-filter" onclick="filterSector('${escHtml(sec)}')">${escHtml(sec)}</button>`;
+    }
+
+    // Success message from redirect
+    const successMsg = req.query.success
+      ? `<div class="cur-success">${escHtml(req.query.success)} MINION(S) ADDED${req.query.quest === '1' ? ' + ADDED TO QUEST BOARD' : ''}</div>`
+      : "";
+
+    // Subject options for the new-minion form
+    const subjectOptions = Array.from(existingSubjects).sort().map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join("");
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Curriculum Planner - Sovereign HUD</title>
+    <style>
+    body { background: #0a0b10; color: #ffea00; font-family: 'Courier New', monospace; padding: 20px; text-transform: uppercase; overflow-x: hidden; }
+    .hud-container { border: 2px solid #ffea00; padding: 20px; box-shadow: 0 0 15px rgba(255, 234, 0, 0.5); max-width: 1100px; margin: auto; padding-bottom: 80px; }
+    .back-link { display: inline-block; color: #00f2ff; text-decoration: none; border: 1px solid #00f2ff; padding: 6px 15px; font-size: 0.8em; transition: all 0.2s; }
+    .back-link:hover { background: #00f2ff; color: #0a0b10; }
+    h1 { text-align: center; color: #ffea00; text-shadow: 2px 2px #ff00ff; letter-spacing: 4px; margin: 15px 0 5px; }
+    .cur-subtitle { text-align: center; color: #888; font-size: 0.7em; letter-spacing: 3px; margin-bottom: 20px; }
+    .cur-success { text-align: center; color: #00ff9d; font-weight: bold; letter-spacing: 2px; margin-bottom: 15px; padding: 10px; border: 1px solid rgba(0,255,157,0.3); background: rgba(0,255,157,0.05); }
+
+    /* Sector filter buttons */
+    .cur-filters { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-bottom: 20px; }
+    .cur-filter {
+        padding: 6px 14px; border: 1px solid #555; background: none; color: #888;
+        font-family: 'Courier New', monospace; font-size: 0.7em; letter-spacing: 1px;
+        cursor: pointer; transition: all 0.2s; text-transform: uppercase;
+    }
+    .cur-filter:hover { border-color: #ffea00; color: #ffea00; }
+    .cur-filter.active { border-color: #ffea00; color: #0a0b10; background: #ffea00; font-weight: bold; }
+
+    /* Sector sections */
+    .cur-sector { margin-bottom: 25px; }
+    .cur-sector-title { color: #ffea00; font-size: 1em; letter-spacing: 3px; border-bottom: 1px solid rgba(255,234,0,0.3); padding-bottom: 6px; margin-bottom: 12px; }
+    .cur-sector-pct { font-size: 0.65em; color: #888; letter-spacing: 1px; }
+
+    /* Boss sections */
+    .cur-boss-section { margin-bottom: 16px; margin-left: 10px; }
+    .cur-boss-header { color: #ff4444; font-size: 0.85em; font-weight: bold; letter-spacing: 2px; margin-bottom: 6px; }
+    .cur-boss-count { color: #666; font-size: 0.8em; font-weight: normal; }
+
+    /* Table */
+    .cur-table { width: 100%; border-collapse: collapse; font-size: 0.8em; }
+    .cur-table th { text-align: left; color: #555; font-size: 0.75em; letter-spacing: 1px; padding: 4px 8px; border-bottom: 1px solid #333; }
+    .cur-table td { padding: 6px 8px; border-bottom: 1px solid rgba(255,255,255,0.04); vertical-align: middle; }
+    .cur-table tr.cur-enslaved { opacity: 0.4; }
+    .cur-table input[type="checkbox"] { accent-color: #ff6600; width: 16px; height: 16px; cursor: pointer; }
+    .cur-rec-tag { font-size: 0.65em; color: #00f2ff; border: 1px solid #00f2ff; padding: 1px 4px; margin-left: 6px; letter-spacing: 1px; vertical-align: middle; }
+
+    /* Task editing */
+    .cur-task-cell { text-transform: none; position: relative; }
+    .cur-task-display { color: #ccc; }
+    .cur-task-input {
+        width: 80%; padding: 3px 6px; background: #1a1d26; border: 1px solid #ffea00; color: #00f2ff;
+        font-family: 'Courier New', monospace; font-size: 0.95em; text-transform: none;
+    }
+    .cur-task-input:focus { outline: none; box-shadow: 0 0 5px rgba(255,234,0,0.3); }
+    .cur-task-edit { color: #555; cursor: pointer; margin-left: 6px; font-size: 0.9em; }
+    .cur-task-edit:hover { color: #ffea00; }
+    .cur-task-save {
+        background: none; border: 1px solid #00ff9d; color: #00ff9d; cursor: pointer;
+        padding: 2px 8px; font-size: 0.85em; margin-left: 4px;
+    }
+    .cur-task-save:hover { background: #00ff9d; color: #0a0b10; }
+
+    /* Batch bar */
+    .cur-batch-bar {
+        position: fixed; bottom: 0; left: 0; right: 0; z-index: 100;
+        background: #0a0b10; border-top: 2px solid #ff6600;
+        padding: 10px 20px; display: none; align-items: center; gap: 12px; justify-content: center;
+        box-shadow: 0 -4px 15px rgba(255,102,0,0.3);
+    }
+    .cur-batch-bar.visible { display: flex; }
+    .cur-batch-count { color: #ff6600; font-weight: bold; font-size: 0.85em; letter-spacing: 2px; }
+    .cur-batch-due { background: #1a1d26; border: 1px solid #ff8800; color: #ff8800; padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.8em; }
+    .cur-batch-btn {
+        padding: 10px 20px; background: #ff6600; color: #0a0b10; border: none;
+        font-family: 'Courier New', monospace; font-weight: bold; font-size: 0.85em;
+        letter-spacing: 2px; cursor: pointer; transition: all 0.2s;
+    }
+    .cur-batch-btn:hover { background: #ffea00; box-shadow: 0 0 10px rgba(255,234,0,0.5); }
+    .cur-batch-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+
+    /* Add new minion section */
+    .cur-add-toggle {
+        display: block; width: 100%; padding: 12px; background: none;
+        border: 1px dashed #ffea00; color: #ffea00; font-family: 'Courier New', monospace;
+        font-size: 0.85em; letter-spacing: 2px; cursor: pointer; margin-top: 20px; transition: all 0.2s;
+        text-transform: uppercase;
+    }
+    .cur-add-toggle:hover { background: rgba(255,234,0,0.08); border-style: solid; }
+    .cur-add-section { display: none; margin-top: 15px; border: 1px solid rgba(255,234,0,0.3); padding: 15px; }
+    .cur-add-section.open { display: block; }
+    .cur-form-group { margin-bottom: 12px; }
+    .cur-form-group label { display: block; color: #ffea00; font-size: 0.75em; letter-spacing: 2px; margin-bottom: 4px; }
+    .cur-form-group input, .cur-form-group select, .cur-form-group textarea {
+        width: 100%; padding: 8px 10px; background: #1a1d26; border: 1px solid #ffea00;
+        color: #00f2ff; font-family: 'Courier New', monospace; font-size: 0.85em; box-sizing: border-box;
+    }
+    .cur-form-group textarea { resize: vertical; min-height: 50px; text-transform: none; }
+    .cur-form-group input:focus, .cur-form-group select:focus, .cur-form-group textarea:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255,234,0,0.3); }
+    .cur-form-row { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+    .cur-form-row2 { display: grid; grid-template-columns: 2fr 3fr 1fr; gap: 12px; }
+    .cur-quest-toggle { display: flex; align-items: center; gap: 10px; margin: 12px 0; padding: 10px; border: 1px solid rgba(255,102,0,0.3); background: rgba(255,102,0,0.05); }
+    .cur-quest-toggle input[type="checkbox"] { width: 18px; height: 18px; accent-color: #ff6600; cursor: pointer; }
+    .cur-quest-toggle label { color: #ff6600; font-size: 0.8em; letter-spacing: 2px; cursor: pointer; }
+    .cur-submit-btn {
+        width: 100%; padding: 12px; background: #ffea00; color: #0a0b10; border: none;
+        font-family: 'Courier New', monospace; font-size: 0.9em; font-weight: bold;
+        letter-spacing: 3px; cursor: pointer; transition: all 0.2s;
+    }
+    .cur-submit-btn:hover { background: #00ff9d; box-shadow: 0 0 15px rgba(0,255,157,0.5); }
+    .required { color: #ff4444; }
+
+    @media (max-width: 600px) {
+        body { padding: 10px; }
+        .cur-form-row, .cur-form-row2 { grid-template-columns: 1fr; }
+        .cur-table { font-size: 0.7em; }
+        .cur-task-cell { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .cur-batch-bar { flex-wrap: wrap; padding: 8px 10px; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+        .hud-container { padding-bottom: 100px; }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin">&lt; ADMIN</a><a class="back-link" href="/">&lt; HUD</a></div>
+        <h1>&#x1F4DA; Curriculum Planner</h1>
+        <div class="cur-subtitle">BROWSE &amp; ASSIGN OBJECTIVES BY SECTOR</div>
+        ${successMsg}
+
+        <div class="cur-filters">${filterBtns}</div>
+
+        ${sectionsHtml}
+
+        <button class="cur-add-toggle" onclick="document.querySelector('.cur-add-section').classList.toggle('open');this.textContent=document.querySelector('.cur-add-section').classList.contains('open')?'\\u2715 CLOSE':'+ ADD NEW MINION'">+ ADD NEW MINION</button>
+        <div class="cur-add-section">
+            <form method="POST" action="/admin/manual" id="curAddForm">
+                <input type="hidden" name="redirect" value="/admin/curriculum">
+                <div class="cur-form-row">
+                    <div class="cur-form-group">
+                        <label>SUBJECT</label>
+                        <select id="cur-subject">
+                            <option value="">Select subject...</option>
+                            <option value="__new__">+ New subject...</option>
+                            ${subjectOptions}
+                        </select>
+                        <input type="text" id="cur-subject-new" name="subject" placeholder="Type new subject..." style="display:none;">
+                    </div>
+                    <div class="cur-form-group">
+                        <label>SECTOR <span class="required">*</span></label>
+                        <select id="cur-sector" name="sector" required>
+                            <option value="" disabled selected>Select sector...</option>
+                            <option value="__new__">+ New sector...</option>
+                            ${sortedSectors.map(s => `<option value="${escHtml(s)}">${escHtml(s)}</option>`).join("")}
+                        </select>
+                        <input type="text" id="cur-sector-new" placeholder="Type new sector..." style="display:none;">
+                    </div>
+                    <div class="cur-form-group">
+                        <label>BOSS <span class="required">*</span></label>
+                        <select id="cur-boss" name="boss" required disabled>
+                            <option value="" disabled selected>Select sector first...</option>
+                        </select>
+                        <input type="text" id="cur-boss-new" placeholder="Type new boss..." style="display:none;">
+                    </div>
+                </div>
+                <div class="cur-form-row2">
+                    <div class="cur-form-group">
+                        <label>MINION NAME <span class="required">*</span></label>
+                        <input type="text" name="minions[]" required placeholder="Minion name...">
+                    </div>
+                    <div class="cur-form-group">
+                        <label>TASK</label>
+                        <textarea name="tasks[]" placeholder="Task description..."></textarea>
+                    </div>
+                    <div class="cur-form-group">
+                        <label>IMPACT <span class="required">*</span></label>
+                        <select name="impacts[]" required>
+                            <option value="1">1</option>
+                            <option value="2" selected>2</option>
+                            <option value="3">3</option>
+                        </select>
+                    </div>
+                </div>
+                <div class="cur-quest-toggle">
+                    <input type="checkbox" id="curAddToQuest" name="addToQuest" value="1">
+                    <label for="curAddToQuest">ALSO ADD TO QUEST BOARD</label>
+                    <div id="cur-due-wrap" style="display:none;margin-left:20px;">
+                        <label style="color:#ff8800;font-size:0.75em;">DUE: <input type="date" name="dueDate" class="cur-batch-due"></label>
+                    </div>
+                </div>
+                <div class="cur-quest-toggle" style="border-color:rgba(0,242,255,0.3);background:rgba(0,242,255,0.05);">
+                    <input type="checkbox" id="curRecurring" name="recurring" value="1">
+                    <label for="curRecurring" style="color:#00f2ff;">RECURRING QUEST</label>
+                </div>
+                <button type="submit" class="cur-submit-btn">ADD MINION</button>
+            </form>
+        </div>
+    </div>
+
+    <div class="cur-batch-bar" id="curBatchBar">
+        <span class="cur-batch-count" id="curBatchCount">0 SELECTED</span>
+        <label style="color:#ff8800;font-size:0.75em;letter-spacing:1px;">DUE: <input type="date" id="curBatchDue" class="cur-batch-due"></label>
+        <form method="POST" action="/quest/start-batch" id="curBatchForm" style="display:inline;">
+            <input type="hidden" name="items" id="curBatchItems" value="[]">
+            <input type="hidden" name="dueDate" id="curBatchDueHidden" value="">
+            <input type="hidden" name="redirect" value="/admin/curriculum">
+            <button type="submit" class="cur-batch-btn" id="curBatchBtn" disabled>ADD TO QUEST BOARD</button>
+        </form>
+    </div>
+
+    <script>
+    var SD = ${JSON.stringify(sectorData)};
+
+    // Sector filter
+    function filterSector(sec) {
+        document.querySelectorAll('.cur-filter').forEach(function(b) { b.classList.remove('active'); });
+        event.target.classList.add('active');
+        document.querySelectorAll('.cur-sector').forEach(function(s) {
+            s.style.display = (sec === 'ALL' || s.dataset.sector === sec) ? '' : 'none';
+        });
+    }
+
+    // Task inline edit
+    function toggleTaskEdit(id) {
+        var display = document.getElementById('td-' + id);
+        var input = document.getElementById('ti-' + id);
+        var save = document.getElementById('ts-' + id);
+        if (!display || !input) return;
+        var editing = input.style.display !== 'none';
+        display.style.display = editing ? '' : 'none';
+        input.style.display = editing ? 'none' : '';
+        save.style.display = editing ? 'none' : '';
+        if (!editing) input.focus();
+    }
+    function saveTask(id) {
+        var input = document.getElementById('ti-' + id);
+        if (!input) return;
+        var data = { sector: input.dataset.sector, boss: input.dataset.boss, minion: input.dataset.minion, task: input.value };
+        fetch('/admin/curriculum/update-task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        }).then(function(r) { return r.json(); }).then(function(res) {
+            if (res.success) {
+                var display = document.getElementById('td-' + id);
+                display.textContent = input.value || 'No task';
+                if (!input.value) display.innerHTML = '<span style="color:#555;font-style:italic;">No task</span>';
+                toggleTaskEdit(id);
+            } else {
+                alert('Error: ' + (res.error || 'Unknown'));
+            }
+        }).catch(function(e) { alert('Error saving: ' + e.message); });
+    }
+
+    // Batch selection
+    function updateBatch() {
+        var checked = document.querySelectorAll('.cur-chk:checked');
+        var bar = document.getElementById('curBatchBar');
+        var count = document.getElementById('curBatchCount');
+        var btn = document.getElementById('curBatchBtn');
+        var items = [];
+        checked.forEach(function(c) {
+            items.push({ boss: c.dataset.boss, minion: c.dataset.minion, sector: c.dataset.sector });
+        });
+        count.textContent = items.length + ' SELECTED';
+        btn.disabled = items.length === 0;
+        document.getElementById('curBatchItems').value = JSON.stringify(items);
+        bar.classList.toggle('visible', items.length > 0);
+    }
+    document.querySelectorAll('.cur-chk').forEach(function(c) {
+        c.addEventListener('change', updateBatch);
+    });
+    document.getElementById('curBatchDue').addEventListener('change', function() {
+        document.getElementById('curBatchDueHidden').value = this.value;
+    });
+
+    // Add-new-minion form: sector/boss cascading
+    var curSubject = document.getElementById('cur-subject');
+    var curSector = document.getElementById('cur-sector');
+    var curBoss = document.getElementById('cur-boss');
+    var curSubjectNew = document.getElementById('cur-subject-new');
+    var curSectorNew = document.getElementById('cur-sector-new');
+    var curBossNew = document.getElementById('cur-boss-new');
+
+    curSubject.addEventListener('change', function() {
+        if (this.value === '__new__') {
+            curSubjectNew.style.display = '';
+            curSubjectNew.focus();
+        } else {
+            curSubjectNew.style.display = 'none';
+            curSubjectNew.value = this.value;
+        }
+    });
+    curSector.addEventListener('change', function() {
+        if (this.value === '__new__') {
+            curSectorNew.style.display = '';
+            curSectorNew.focus();
+            curSectorNew.name = 'sector';
+            curSector.name = '';
+        } else {
+            curSectorNew.style.display = 'none';
+            curSectorNew.name = '';
+            curSector.name = 'sector';
+            // Populate bosses
+            curBoss.innerHTML = '<option value="" disabled selected>Select boss...</option><option value="__new__">+ New boss...</option>';
+            var bosses = SD[this.value] || [];
+            bosses.forEach(function(b) { curBoss.innerHTML += '<option value="' + b + '">' + b + '</option>'; });
+            curBoss.disabled = false;
+        }
+    });
+    curBoss.addEventListener('change', function() {
+        if (this.value === '__new__') {
+            curBossNew.style.display = '';
+            curBossNew.focus();
+            curBossNew.name = 'boss';
+            curBoss.name = '';
+        } else {
+            curBossNew.style.display = 'none';
+            curBossNew.name = '';
+            curBoss.name = 'boss';
+        }
+    });
+
+    // Add-to-quest toggle
+    var curAddToQuest = document.getElementById('curAddToQuest');
+    var curRecurring = document.getElementById('curRecurring');
+    var curDueWrap = document.getElementById('cur-due-wrap');
+    curAddToQuest.addEventListener('change', function() {
+        curDueWrap.style.display = (curAddToQuest.checked && !curRecurring.checked) ? '' : 'none';
+    });
+    curRecurring.addEventListener('change', function() {
+        if (curRecurring.checked) curAddToQuest.checked = true;
+        curDueWrap.style.display = (curAddToQuest.checked && !curRecurring.checked) ? '' : 'none';
+    });
+    </script>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("Curriculum planner error:", err);
+    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+  }
+});
+
+app.post("/admin/curriculum/update-task", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { sector, boss, minion, task } = req.body;
+    if (!sector || !boss || !minion) {
+      return res.status(400).json({ error: "Sector, boss, and minion are required" });
+    }
+
+    const sheets = await getSheets();
+    const sectorsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Sectors",
+    });
+    const rows = sectorsRes.data.values;
+    if (!rows || rows.length < 2) {
+      return res.status(404).json({ error: "No Sectors data found" });
+    }
+
+    const headers = rows[0];
+    const sectorCol = headers.findIndex(h => h.toLowerCase() === "sector");
+    const bossCol = headers.findIndex(h => h.toLowerCase() === "boss");
+    const minionCol = headers.findIndex(h => h.toLowerCase() === "minion");
+    const taskCol = headers.findIndex(h => h.toLowerCase() === "task");
+    if (taskCol < 0) {
+      return res.status(500).json({ error: "Task column not found in Sectors sheet" });
+    }
+
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if ((rows[i][sectorCol] || "") === sector && (rows[i][bossCol] || "") === boss && (rows[i][minionCol] || "") === minion) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+    if (targetRow === -1) {
+      return res.status(404).json({ error: "Minion not found" });
+    }
+
+    const colRef = String.fromCharCode(65 + taskCol);
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Sectors!${colRef}${targetRow}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[task || ""]] },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Update task error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -9462,6 +10906,44 @@ app.post("/admin/import/approve", async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// ---------------------------------------------------------------------------
+// Admin: Test Weekly Email (temporary — remove after confirming it works)
+// ---------------------------------------------------------------------------
+app.get("/admin/test-email", async (req, res) => {
+  try {
+    await sendWeeklySummaryEmail();
+    res.send(`<pre style="color:#00ff9d;background:#0a0b10;padding:20px;font-family:monospace;">Weekly summary email sent! Check teacher inboxes.</pre>`);
+  } catch (err) {
+    console.error("Test email error:", err);
+    res.status(500).send(`<pre style="color:red;background:#0a0b10;padding:20px;">Error: ${err.message}</pre>`);
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Weekly Email Scheduler — sends every Sunday at 8am+
+// ---------------------------------------------------------------------------
+let lastWeeklyEmailDate = "";
+
+function checkWeeklyEmail() {
+  const now = new Date();
+  const todayStr = now.toISOString().slice(0, 10);
+  const dayOfWeek = now.getDay(); // 0 = Sunday
+  const hour = now.getHours();
+
+  if (dayOfWeek === 0 && hour >= 8 && lastWeeklyEmailDate !== todayStr) {
+    lastWeeklyEmailDate = todayStr;
+    sendWeeklySummaryEmail().catch(err => {
+      console.error("Weekly email scheduler error:", err.message);
+    });
+  }
+}
+
+// Check every hour
+setInterval(checkWeeklyEmail, 60 * 60 * 1000);
+
+// Also check 30 seconds after startup (in case server restarts on Sunday)
+setTimeout(checkWeeklyEmail, 30 * 1000);
 
 app.listen(PORT, () => {
   console.log(`Sovereign HUD online at http://localhost:${PORT}`);
