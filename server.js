@@ -1688,7 +1688,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Sovereign HUD</title>
     <style>
     body {
@@ -1705,6 +1705,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         box-shadow: 0 0 15px #00f2ff;
         max-width: 960px;
         margin: auto;
+        box-sizing: border-box;
     }
     h1 {
         text-shadow: 2px 2px #ff00ff;
@@ -2326,6 +2327,11 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         body { padding: 10px; }
         .hud-container { padding: 15px; }
         .confidence-row { flex-direction: column; }
+        .confidence-bar-section { width: 100%; }
+        .stat-bar { max-width: 100%; }
+        .mode-banner { font-size: 0.8em; letter-spacing: 1px; word-break: break-word; }
+        .mode-subtitle { font-size: 0.6em; letter-spacing: 1px; }
+        .mode-header { overflow: hidden; }
         .levels-right {
             padding-left: 0;
             padding-top: 15px;
@@ -2348,7 +2354,7 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
             justify-content: center;
             background: rgba(10,11,16,0.95);
             border-top: 1px solid #333;
-            padding: 6px 4px;
+            padding: 6px 4px calc(6px + env(safe-area-inset-bottom, 0px)) 4px;
         }
         .side-nav a { font-size: 0.6em; padding: 6px 8px; letter-spacing: 1px; }
         .side-nav a:hover { padding-left: 8px; }
@@ -2598,7 +2604,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>${bossName} - Minion Roster</title>
     <style>
     body {
@@ -2615,6 +2621,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
         box-shadow: 0 0 15px #00f2ff;
         max-width: 960px;
         margin: auto;
+        box-sizing: border-box;
     }
     h1 {
         text-shadow: 2px 2px #ff00ff;
@@ -3006,7 +3013,7 @@ app.get("/login", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Login - Sovereign HUD</title>
     <style>
     body { background: #0a0b10; color: #00f2ff; font-family: 'Courier New', monospace; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; text-transform: uppercase; }
@@ -3109,7 +3116,7 @@ app.post("/login", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Verify - Sovereign HUD</title>
     <style>
     body { background: #0a0b10; color: #00f2ff; font-family: 'Courier New', monospace; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; text-transform: uppercase; }
@@ -3188,7 +3195,7 @@ app.post("/login/verify", async (req, res) => {
       const userName = user ? user["Name"] || email : email;
 
       return res.send(`<!DOCTYPE html>
-<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Verify - Sovereign HUD</title>
+<html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Verify - Sovereign HUD</title>
 <style>
 body { background: #0a0b10; color: #00f2ff; font-family: 'Courier New', monospace; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; text-transform: uppercase; }
 .login-box { border: 2px solid #ffea00; padding: 40px; box-shadow: 0 0 30px rgba(255,234,0,0.3); text-align: center; max-width: 450px; width: 90%; }
@@ -3549,7 +3556,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>${escHtml(sectorName)} - Sector Overview</title>
     <style>
     body {
@@ -3805,7 +3812,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Ring of Guardians - Sovereign HUD</title>
     <style>
     body {
@@ -4014,7 +4021,7 @@ function buildQuestBoardPage(cardHtml, expandHtml, activeCount, totalCount, recu
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Quest Board - Sovereign HUD</title>
     <style>
     body {
@@ -4031,6 +4038,7 @@ function buildQuestBoardPage(cardHtml, expandHtml, activeCount, totalCount, recu
         box-shadow: 0 0 15px #00f2ff;
         max-width: 960px;
         margin: auto;
+        box-sizing: border-box;
     }
     h1 {
         text-shadow: 2px 2px #ff00ff;
@@ -4979,7 +4987,7 @@ app.get("/today", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Today - Sovereign HUD</title>
     <style>
     body {
@@ -5219,7 +5227,7 @@ function buildRecurringPage(cardHtml, expandHtml, totalCount, loggedCount, isTea
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Recurring Quests - Sovereign HUD</title>
     <style>
     body {
@@ -5236,6 +5244,7 @@ function buildRecurringPage(cardHtml, expandHtml, totalCount, loggedCount, isTea
         box-shadow: 0 0 15px #00f2ff;
         max-width: 960px;
         margin: auto;
+        box-sizing: border-box;
     }
     h1 {
         text-shadow: 2px 2px #ff00ff;
@@ -5946,7 +5955,7 @@ app.get("/badges", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Badges - Sovereign HUD</title>
     <style>
     body {
@@ -6182,7 +6191,7 @@ app.get("/army", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Henry's Army - Sovereign HUD</title>
     <style>
     body {
@@ -6446,7 +6455,7 @@ app.get("/defiant", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Defiant Minions - Sovereign HUD</title>
     <style>
     body {
@@ -7286,7 +7295,7 @@ app.get("/progress", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Progress Report - Sovereign HUD</title>
     <style>
     body {
@@ -7738,7 +7747,7 @@ function buildAdminPage(pendingCount) {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Parent Admin - Sovereign HUD</title>
     <style>
     body {
@@ -7950,7 +7959,7 @@ app.get("/admin/quests", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Quest Approval</title>
     <style>
     body { background: #0a0b10; color: #00f2ff; font-family: 'Courier New', monospace; padding: 20px; text-transform: uppercase; }
@@ -8461,7 +8470,7 @@ app.get("/admin/locks", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Lock/Unlock Management</title>
     <style>
     body { background: #0a0b10; color: #00f2ff; font-family: 'Courier New', monospace; padding: 20px; text-transform: uppercase; }
@@ -9096,7 +9105,7 @@ app.get("/admin/manual", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Manual Entry - Sovereign HUD</title>
     <style>
     body {
@@ -9864,7 +9873,7 @@ app.get("/admin/curriculum", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Curriculum Planner - Sovereign HUD</title>
     <style>
     body { background: #0a0b10; color: #ffea00; font-family: 'Courier New', monospace; padding: 20px; text-transform: uppercase; overflow-x: hidden; }
@@ -10289,7 +10298,7 @@ app.get("/admin/notes", async (req, res) => {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Teacher Notes - Sovereign HUD</title>
     <style>
     body { background: #0a0b10; color: #00f2ff; font-family: 'Courier New', monospace; padding: 20px; text-transform: uppercase; }
@@ -10375,7 +10384,7 @@ function buildImportPage() {
 <html>
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
     <title>Photo Import - Sovereign HUD</title>
     <style>
     body {
