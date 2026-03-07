@@ -59,6 +59,74 @@ async function getSheets() {
 }
 
 // ---------------------------------------------------------------------------
+// Simple in-memory cache for Google Sheets reads (TTL-based)
+// ---------------------------------------------------------------------------
+const _cache = {};
+const CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+
+function cacheGet(key) {
+  const entry = _cache[key];
+  if (!entry) return null;
+  if (Date.now() > entry.expires) { delete _cache[key]; return null; }
+  return entry.data;
+}
+
+function cacheSet(key, data, ttl = CACHE_TTL) {
+  _cache[key] = { data, expires: Date.now() + ttl };
+}
+
+function cacheInvalidate(...keys) {
+  for (const key of keys) delete _cache[key];
+}
+
+// Invalidate all caches (after writes that affect multiple sheets)
+function cacheInvalidateAll() {
+  for (const key of Object.keys(_cache)) delete _cache[key];
+}
+
+// ---------------------------------------------------------------------------
+// Case-insensitive header column finder (sheets headers may vary in casing)
+// ---------------------------------------------------------------------------
+function findCol(headers, name) {
+  const lower = name.toLowerCase();
+  return headers.findIndex(h => (h || "").toLowerCase() === lower);
+}
+
+// ---------------------------------------------------------------------------
+// Convert column index to letter(s) for Sheets API (0 → A, 25 → Z, 26 → AA)
+// ---------------------------------------------------------------------------
+function colLetter(idx) {
+  if (idx < 26) return String.fromCharCode(65 + idx);
+  return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
+}
+
+// ---------------------------------------------------------------------------
+// Shared base CSS for all pages (theme colors, body, back-link, container)
+// ---------------------------------------------------------------------------
+const BASE_CSS = `
+  :root {
+    --bg: #0a0b10; --cyan: #00f2ff; --magenta: #ff00ff; --yellow: #ffea00;
+    --green: #00ff9d; --orange: #ff8800; --red: #ff4444; --red-bright: #ff0044;
+    --font: 'Courier New', monospace;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--bg); color: var(--cyan); font-family: var(--font); margin: 0; padding: 20px; text-transform: uppercase; }
+  a { color: var(--cyan); }
+  .back-link { display: inline-block; margin-top: 15px; font-size: 0.75em; color: #888; text-decoration: none; letter-spacing: 1px; border: 1px solid #333; padding: 6px 14px; }
+  .back-link:hover { background: var(--cyan); color: var(--bg); }
+  .hud-container { max-width: 900px; margin: 0 auto; border: 2px solid var(--cyan); padding: 20px; box-shadow: 0 0 30px rgba(0,242,255,0.15); }
+`;
+
+// Shared error page renderer
+function errorPage(message) {
+  return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Error</title>
+<style>${BASE_CSS} body { display:flex;align-items:center;justify-content:center;min-height:100vh; }
+.err { border:2px solid var(--red);padding:40px;text-align:center;max-width:600px;color:var(--red); }
+.err pre { white-space:pre-wrap;word-break:break-all;text-align:left;font-size:0.8em; }
+</style></head><body><div class="err"><h2>SYSTEM ERROR</h2><pre>${message}</pre><a href="/" class="back-link">BACK TO HUD</a></div></body></html>`;
+}
+
+// ---------------------------------------------------------------------------
 // Convert raw sheet values (2D array) into array of objects keyed by header
 // ---------------------------------------------------------------------------
 function parseTable(values) {
@@ -135,16 +203,20 @@ const BADGE_DEFINITIONS = {
 // Fetch all sheet data in one call (whole tables, headers included)
 // ---------------------------------------------------------------------------
 async function fetchSheetData(sheets) {
+  const cached = cacheGet("sheetData");
+  if (cached) return cached;
   const res = await sheets.spreadsheets.values.batchGet({
     spreadsheetId: SPREADSHEET_ID,
     ranges: ["Command_Center", "Definitions", "Sectors"],
   });
   const [cc, defs, sectors] = res.data.valueRanges;
-  return {
+  const data = {
     commandCenter: parseTable(cc.values),
     definitions: parseTable(defs.values),
     sectors: parseTable(sectors.values),
   };
+  cacheSet("sheetData", data);
+  return data;
 }
 
 // ---------------------------------------------------------------------------
@@ -226,18 +298,20 @@ async function sendHtmlEmail(email, subject, htmlBody) {
 async function sendWeeklySummaryEmail() {
   console.log("Building weekly summary email...");
   const sheets = await getSheets();
+  await ensureScheduleSheet(sheets);
 
   // Fetch all data in one batch
   const batchRes = await sheets.spreadsheets.values.batchGet({
     spreadsheetId: SPREADSHEET_ID,
-    ranges: ["Sectors", "Command_Center", "Quests", "Quest_Log", "Users"],
+    ranges: ["Sectors", "Command_Center", "Quests", "Quest_Log", "Users", "Schedule"],
   });
-  const [sectorsRaw, ccRaw, questsRaw, logsRaw, usersRaw] = batchRes.data.valueRanges;
+  const [sectorsRaw, ccRaw, questsRaw, logsRaw, usersRaw, scheduleRaw] = batchRes.data.valueRanges;
   const allMinions = parseTable(sectorsRaw.values || []);
   const commandCenter = parseTable(ccRaw.values || []);
   const quests = parseTable(questsRaw.values || []);
   const questLogs = parseTable(logsRaw.values || []);
   const users = parseTable(usersRaw.values || []);
+  const emailSchedule = parseTable((scheduleRaw && scheduleRaw.values) || []);
 
   // Teacher emails
   const teachers = users.filter(u => (u["Role"] || "").toLowerCase() === "teacher" && u["Email"]);
@@ -274,20 +348,20 @@ async function sendWeeklySummaryEmail() {
   // 3. Submitted queue (awaiting review)
   const submitted = quests.filter(q => q["Status"] === "Submitted");
 
-  // 4. Recurring quest log rate
-  const recCol = findRecurringCol(allMinions);
+  // 4. Reading progress (chapter completion per book)
   const activeRecurring = quests.filter(q =>
     (q["Recurring"] || "").toUpperCase() === "X" && (q["Status"] === "Active" || q["Status"] === "Rejected")
   );
-  const recurringStats = [];
+  const readingStats = [];
   for (const rq of activeRecurring) {
     const qid = rq["Quest ID"];
-    const logsForQuest = weekLogs.filter(l => l["Quest ID"] === qid);
-    const loggedDates = new Set(logsForQuest.map(l => (l["Date"] || "").slice(0, 10)));
-    recurringStats.push({
+    const chapters = emailSchedule.filter(s => s["Quest ID"] === qid);
+    const doneCount = chapters.filter(c => (c["Completed"] || "").toUpperCase() === "X").length;
+    readingStats.push({
       minion: rq["Minion"],
       boss: rq["Boss"],
-      daysLogged: loggedDates.size,
+      done: doneCount,
+      total: chapters.length,
     });
   }
 
@@ -322,28 +396,29 @@ async function sendWeeklySummaryEmail() {
 
   let completedRows = "";
   for (const q of completedThisWeek) {
-    completedRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(q["Minion"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#888;">${esc(q["Sector"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${parseInt(q["Time Spent"]) || 0}m</td></tr>`;
+    completedRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(bookTitle(q["Minion"]))}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#888;">${esc(q["Sector"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${parseInt(q["Time Spent"]) || 0}m</td></tr>`;
   }
 
   let submittedRows = "";
   for (const q of submitted) {
-    submittedRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(q["Minion"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ffea00;">${q["Date Completed"] || ""}</td></tr>`;
+    submittedRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(bookTitle(q["Minion"]))}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ffea00;">${q["Date Completed"] || ""}</td></tr>`;
   }
 
   let recurringRows = "";
-  for (const r of recurringStats) {
-    const color = r.daysLogged >= 5 ? "#00ff9d" : r.daysLogged >= 3 ? "#ffea00" : "#ff0044";
-    recurringRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(r.minion)}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(r.boss)}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:${color};font-weight:bold;">${r.daysLogged}/7 days</td></tr>`;
+  for (const r of readingStats) {
+    const pct = r.total > 0 ? Math.round(r.done / r.total * 100) : 0;
+    const color = pct >= 75 ? "#00ff9d" : pct >= 40 ? "#ffea00" : "#ff0044";
+    recurringRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(bookTitle(r.minion))}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(r.boss)}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:${color};font-weight:bold;">${r.done}/${r.total} ch (${pct}%)</td></tr>`;
   }
 
   let overdueRows = "";
   for (const q of overdue) {
-    overdueRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(q["Minion"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff0044;">${q["Due Date"]}</td></tr>`;
+    overdueRows += `<tr><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ccc;">${esc(bookTitle(q["Minion"]))}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff8800;">${esc(q["Boss"])}</td><td style="padding:6px 10px;border-bottom:1px solid #333;color:#ff0044;">${q["Due Date"]}</td></tr>`;
   }
 
   let reflectionRows = "";
   for (const r of reflections) {
-    reflectionRows += `<tr><td style="padding:8px 10px;border-bottom:1px solid #333;color:#00f2ff;font-style:italic;font-size:13px;">"${esc(r.reflection)}"<br><span style="color:#888;font-style:normal;font-size:11px;">${esc(r.boss)} &gt; ${esc(r.minion)}</span></td></tr>`;
+    reflectionRows += `<tr><td style="padding:8px 10px;border-bottom:1px solid #333;color:#00f2ff;font-style:italic;font-size:13px;">"${esc(r.reflection)}"<br><span style="color:#888;font-style:normal;font-size:11px;">${esc(r.boss)} &gt; ${esc(bookTitle(r.minion))}</span></td></tr>`;
   }
 
   const siteUrl = "https://homeschool-tracker.hyrumjones.com";
@@ -428,9 +503,9 @@ async function sendWeeklySummaryEmail() {
   </td></tr>` : ""}
 
   ${activeRecurring.length > 0 ? `
-  <!-- Recurring Log Rate -->
+  <!-- Reading Progress -->
   <tr><td style="padding:15px 20px 5px;">
-    <div style="color:#00f2ff;font-size:13px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #333;padding-bottom:6px;">&#x1F504; RECURRING QUEST LOG RATE</div>
+    <div style="color:#00f2ff;font-size:13px;font-weight:bold;letter-spacing:2px;border-bottom:1px solid #333;padding-bottom:6px;">&#x1F4DA; READING PROGRESS</div>
   </td></tr>
   <tr><td style="padding:0 20px 10px;">
     <table width="100%" cellpadding="0" cellspacing="0" style="font-size:12px;">${recurringRows}</table>
@@ -466,9 +541,15 @@ async function sendWeeklySummaryEmail() {
 }
 
 // ---------------------------------------------------------------------------
+// Sheet-existence cache — once verified, skip redundant API checks
+// ---------------------------------------------------------------------------
+const _sheetVerified = {};
+
+// ---------------------------------------------------------------------------
 // Ensure the Quests sheet tab exists (auto-create with headers if missing)
 // ---------------------------------------------------------------------------
 async function ensureQuestsSheet(sheets) {
+  if (_sheetVerified.Quests) return;
   const expectedHeaders = ["Quest ID", "Boss", "Minion", "Sector", "Status", "Proof Type", "Proof Link", "Suggested By AI", "Date Completed", "Date Added", "Date Resolved", "Feedback", "Due Date", "Subject", "Recurring", "Reflection", "Time Spent"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -484,10 +565,11 @@ async function ensureQuestsSheet(sheets) {
     });
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Quests!A1:${String.fromCharCode(64 + expectedHeaders.length)}1`,
+      range: `Quests!A1:${colLetter(expectedHeaders.length - 1)}1`,
       valueInputOption: "RAW",
       requestBody: { values: [expectedHeaders] },
     });
+    _sheetVerified.Quests = true;
     return;
   }
   // Check for missing columns and add them
@@ -501,17 +583,19 @@ async function ensureQuestsSheet(sheets) {
     const updated = [...currentHeaders, ...missing];
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Quests!A1:${String.fromCharCode(64 + updated.length)}1`,
+      range: `Quests!A1:${colLetter(updated.length - 1)}1`,
       valueInputOption: "RAW",
       requestBody: { values: [updated] },
     });
   }
+  _sheetVerified.Quests = true;
 }
 
 // ---------------------------------------------------------------------------
 // Ensure Users sheet exists
 // ---------------------------------------------------------------------------
 async function ensureUsersSheet(sheets) {
+  if (_sheetVerified.Users) return;
   const expectedHeaders = ["Email", "Name", "Role"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -527,10 +611,11 @@ async function ensureUsersSheet(sheets) {
     });
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Users!A1:${String.fromCharCode(64 + expectedHeaders.length)}1`,
+      range: `Users!A1:${colLetter(expectedHeaders.length - 1)}1`,
       valueInputOption: "RAW",
       requestBody: { values: [expectedHeaders] },
     });
+    _sheetVerified.Users = true;
     return;
   }
   // Check for missing columns (e.g. PIN added later)
@@ -544,11 +629,12 @@ async function ensureUsersSheet(sheets) {
     const updated = [...currentHeaders, ...missing];
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Users!A1:${String.fromCharCode(64 + updated.length)}1`,
+      range: `Users!A1:${colLetter(updated.length - 1)}1`,
       valueInputOption: "RAW",
       requestBody: { values: [updated] },
     });
   }
+  _sheetVerified.Users = true;
 }
 
 // Look up user role from Users sheet by email
@@ -574,6 +660,7 @@ async function getUserRole(email) {
 // Ensure Teacher_Notes sheet exists
 // ---------------------------------------------------------------------------
 async function ensureTeacherNotesSheet(sheets) {
+  if (_sheetVerified.Teacher_Notes) return;
   const expectedHeaders = ["Date", "Author", "Subject", "Note"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -594,9 +681,11 @@ async function ensureTeacherNotesSheet(sheets) {
       requestBody: { values: [expectedHeaders] },
     });
   }
+  _sheetVerified.Teacher_Notes = true;
 }
 
 async function ensureBadgesSheet(sheets) {
+  if (_sheetVerified.Badges) return;
   const expectedHeaders = ["Badge ID", "Category", "Name", "Date Earned"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -617,12 +706,14 @@ async function ensureBadgesSheet(sheets) {
       requestBody: { values: [expectedHeaders] },
     });
   }
+  _sheetVerified.Badges = true;
 }
 
 // ---------------------------------------------------------------------------
 // Ensure Quest_Log sheet exists (for recurring quest daily entries)
 // ---------------------------------------------------------------------------
 async function ensureQuestLogSheet(sheets) {
+  if (_sheetVerified.Quest_Log) return;
   const expectedHeaders = ["Quest ID", "Date", "Note", "Author", "Time Spent"];
   const meta = await sheets.spreadsheets.get({
     spreadsheetId: SPREADSHEET_ID,
@@ -642,6 +733,7 @@ async function ensureQuestLogSheet(sheets) {
       valueInputOption: "RAW",
       requestBody: { values: [expectedHeaders] },
     });
+    _sheetVerified.Quest_Log = true;
     return;
   }
   const headerRes = await sheets.spreadsheets.values.get({
@@ -654,35 +746,105 @@ async function ensureQuestLogSheet(sheets) {
     const updated = [...currentHeaders, ...missing];
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Quest_Log!A1:${String.fromCharCode(64 + updated.length)}1`,
+      range: `Quest_Log!A1:${colLetter(updated.length - 1)}1`,
       valueInputOption: "RAW",
       requestBody: { values: [updated] },
     });
   }
+  _sheetVerified.Quest_Log = true;
+}
+
+// ---------------------------------------------------------------------------
+// Ensure Schedule sheet exists (for chapter-based reading schedules)
+// ---------------------------------------------------------------------------
+async function ensureScheduleSheet(sheets) {
+  if (_sheetVerified.Schedule) return;
+  const expectedHeaders = ["Quest ID", "Chapter", "Title", "Time", "Scheduled Date", "Completed", "Details"];
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: "sheets.properties.title",
+  });
+  const titles = meta.data.sheets.map((s) => s.properties.title);
+  if (!titles.includes("Schedule")) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: "Schedule" } } }],
+      },
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Schedule!A1:G1",
+      valueInputOption: "RAW",
+      requestBody: { values: [expectedHeaders] },
+    });
+    _sheetVerified.Schedule = true;
+    return;
+  }
+  const headerRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Schedule!1:1",
+  });
+  const currentHeaders = (headerRes.data.values && headerRes.data.values[0]) || [];
+  const missing = expectedHeaders.filter((h) => !currentHeaders.includes(h));
+  if (missing.length > 0) {
+    const updated = [...currentHeaders, ...missing];
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Schedule!A1:${colLetter(updated.length - 1)}1`,
+      valueInputOption: "RAW",
+      requestBody: { values: [updated] },
+    });
+  }
+  _sheetVerified.Schedule = true;
+}
+
+// ---------------------------------------------------------------------------
+// Fetch Schedule sheet data
+// ---------------------------------------------------------------------------
+async function fetchScheduleData(sheets) {
+  const cached = cacheGet("schedule");
+  if (cached) return cached;
+  await ensureScheduleSheet(sheets);
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Schedule",
+  });
+  const data = parseTable(res.data.values);
+  cacheSet("schedule", data);
+  return data;
 }
 
 // ---------------------------------------------------------------------------
 // Fetch Quests sheet data
 // ---------------------------------------------------------------------------
 async function fetchQuestsData(sheets) {
+  const cached = cacheGet("quests");
+  if (cached) return cached;
   await ensureQuestsSheet(sheets);
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: "Quests",
   });
-  return parseTable(res.data.values);
+  const data = parseTable(res.data.values);
+  cacheSet("quests", data);
+  return data;
 }
 
 // ---------------------------------------------------------------------------
 // Fetch Quest_Log sheet data
 // ---------------------------------------------------------------------------
 async function fetchQuestLogData(sheets) {
+  const cached = cacheGet("questLog");
+  if (cached) return cached;
   await ensureQuestLogSheet(sheets);
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: "Quest_Log",
   });
-  return parseTable(res.data.values);
+  const data = parseTable(res.data.values);
+  cacheSet("questLog", data);
+  return data;
 }
 
 // ---------------------------------------------------------------------------
@@ -736,10 +898,6 @@ function findAbandonedQuestRow(questRows, boss, minion, sector) {
 // ---------------------------------------------------------------------------
 async function reactivateQuest(sheets, questRows, rowNum, { proofType, taskDetail, dueDate, subject, recurring }) {
   const headers = questRows[0];
-  const colLetter = (idx) => {
-    if (idx < 26) return String.fromCharCode(65 + idx);
-    return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
-  };
   const today = new Date().toISOString().slice(0, 10);
   const updates = [];
   const set = (colName, value) => {
@@ -830,51 +988,26 @@ function generateQuestId() {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: sync Quest Status (and optionally main Status) to Sectors sheet
+// Helper: build Sectors update entries for a single minion's quest status change
+// Requires pre-fetched rows/headers/column indices. Returns array of { range, values } objects.
 // ---------------------------------------------------------------------------
-async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatus, options = {}) {
-  const secRes = await sheets.spreadsheets.values.get({
-    spreadsheetId: SPREADSHEET_ID,
-    range: "Sectors",
-  });
-  const rows = secRes.data.values;
-  if (!rows || rows.length < 2) return;
-
-  const headers = rows[0];
-  const questStatusCol = headers.indexOf("Quest Status");
-  const statusCol = headers.indexOf("Status");
-  const sectorCol = headers.indexOf("Sector");
-  const bossCol = headers.indexOf("Boss");
-  const minionCol = headers.indexOf("Minion");
-  const dateAddedCol = headers.indexOf("Date Quest Added");
-  const dateCompletedCol = headers.indexOf("Date Quest Completed");
-  let questDueDateCol = headers.findIndex(h => h.toLowerCase() === "quest due date");
-
-  if (questStatusCol < 0 || sectorCol < 0 || bossCol < 0 || minionCol < 0) return;
-
-  const colLetter = (idx) => {
-    if (idx < 26) return String.fromCharCode(65 + idx);
-    return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
-  };
-
+function buildSectorsQuestUpdates(rows, cols, sector, boss, minion, questStatus, options = {}) {
+  const { questStatusCol, statusCol, sectorCol, bossCol, minionCol, dateAddedCol, dateCompletedCol, questDueDateCol } = cols;
   const now = new Date().toISOString().slice(0, 10);
-
   const updates = [];
+
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][sectorCol] === sector && rows[i][bossCol] === boss && rows[i][minionCol] === minion) {
-      const rowNum = i + 1; // 1-based for Sheets API
+      const rowNum = i + 1;
       updates.push({ range: `Sectors!${colLetter(questStatusCol)}${rowNum}`, values: [[questStatus]] });
 
-      // Auto-enslave when approved
       if (questStatus === "Approved" && statusCol >= 0) {
         updates.push({ range: `Sectors!${colLetter(statusCol)}${rowNum}`, values: [["Enslaved"]] });
-        // Set Date Quest Completed
         if (dateCompletedCol >= 0) {
           updates.push({ range: `Sectors!${colLetter(dateCompletedCol)}${rowNum}`, values: [[now]] });
         }
       }
 
-      // Quest added to board — set Date Quest Added and Due Date
       if (questStatus === "Active" && dateAddedCol >= 0) {
         updates.push({ range: `Sectors!${colLetter(dateAddedCol)}${rowNum}`, values: [[now]] });
       }
@@ -882,7 +1015,6 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
         updates.push({ range: `Sectors!${colLetter(questDueDateCol)}${rowNum}`, values: [[options.dueDate]] });
       }
 
-      // Un-approve: revert to Engaged, clear completion date
       if ((questStatus === "Rejected" || questStatus === "Submitted") && statusCol >= 0) {
         const currentStatus = rows[i][statusCol] || "";
         if (currentStatus === "Enslaved") {
@@ -893,7 +1025,6 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
         }
       }
 
-      // Quest removed/abandoned — clear all quest dates
       if (questStatus === "" || questStatus === "Abandoned") {
         if (dateAddedCol >= 0) {
           updates.push({ range: `Sectors!${colLetter(dateAddedCol)}${rowNum}`, values: [[""]] });
@@ -909,15 +1040,68 @@ async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatu
       break;
     }
   }
+  return updates;
+}
 
+// Fetch Sectors rows and parse column indices (shared by single + batch update)
+async function fetchSectorsRaw(sheets) {
+  const secRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Sectors",
+  });
+  const rows = secRes.data.values;
+  if (!rows || rows.length < 2) return null;
+  const headers = rows[0];
+  const cols = {
+    questStatusCol: findCol(headers, "Quest Status"),
+    statusCol: findCol(headers, "Status"),
+    sectorCol: findCol(headers, "Sector"),
+    bossCol: findCol(headers, "Boss"),
+    minionCol: findCol(headers, "Minion"),
+    dateAddedCol: findCol(headers, "Date Quest Added"),
+    dateCompletedCol: findCol(headers, "Date Quest Completed"),
+    questDueDateCol: findCol(headers, "Quest Due Date"),
+  };
+  if (cols.questStatusCol < 0 || cols.sectorCol < 0 || cols.bossCol < 0 || cols.minionCol < 0) return null;
+  return { rows, cols };
+}
+
+// Single-minion update (original API — fetches Sectors itself)
+async function updateSectorsQuestStatus(sheets, sector, boss, minion, questStatus, options = {}) {
+  const data = await fetchSectorsRaw(sheets);
+  if (!data) return;
+  const updates = buildSectorsQuestUpdates(data.rows, data.cols, sector, boss, minion, questStatus, options);
   if (updates.length > 0) {
     await sheets.spreadsheets.values.batchUpdate({
       spreadsheetId: SPREADSHEET_ID,
       requestBody: { valueInputOption: "RAW", data: updates },
     });
-
-    // Auto-unlock: when a minion becomes Enslaved, check if any Locked minions' prerequisites are now met
+    cacheInvalidate("sheetData");
     if (questStatus === "Approved") {
+      try { await checkAndUnlockPrerequisites(sheets); } catch (e) { console.error("Auto-unlock check failed:", e.message); }
+    }
+  }
+}
+
+// Batch update multiple minions in one Sectors fetch + one batchUpdate call
+// items: [{ sector, boss, minion, questStatus, options }]
+async function batchUpdateSectorsQuestStatus(sheets, items) {
+  const data = await fetchSectorsRaw(sheets);
+  if (!data) return;
+  const allUpdates = [];
+  let hasApproved = false;
+  for (const item of items) {
+    const updates = buildSectorsQuestUpdates(data.rows, data.cols, item.sector, item.boss, item.minion, item.questStatus, item.options || {});
+    allUpdates.push(...updates);
+    if (item.questStatus === "Approved") hasApproved = true;
+  }
+  if (allUpdates.length > 0) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: "RAW", data: allUpdates },
+    });
+    cacheInvalidate("sheetData");
+    if (hasApproved) {
       try { await checkAndUnlockPrerequisites(sheets); } catch (e) { console.error("Auto-unlock check failed:", e.message); }
     }
   }
@@ -1113,7 +1297,7 @@ function buildRejectedAlertsHtml(quests) {
 
   const rows = rejected.map((q) =>
     `<div class="rejected-entry">
-      <span>${escHtml(q["Boss"])} &gt; ${escHtml(q["Minion"])}</span>
+      <span>${escHtml(q["Boss"])} &gt; ${escHtml(bookTitle(q["Minion"]))}</span>
       ${q["Feedback"] ? `<div class="rejected-reason">${escHtml(q["Feedback"])}</div>` : ""}
     </div>`
   ).join("");
@@ -1293,6 +1477,74 @@ function buildRadarSVG(values, maxVal, ringCount, size, options = {}) {
 // ---------------------------------------------------------------------------
 function escHtml(str) {
   return String(str).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+// Extract display title from "Title | Author, Year" format (strips metadata after |)
+function bookTitle(name) {
+  return (name || "").split("|")[0].trim();
+}
+
+// Enrich quest Minion names from Sectors sheet (Sectors is the single source of truth)
+// Matches recurring quests by Sector+Boss to get the current Minion name from Sectors
+// Also syncs mismatched names back to the Quests sheet in the background
+function enrichQuestsFromSectors(quests, sectors, sheets) {
+  const sectorMap = {};
+  for (const m of sectors) {
+    const key = (m["Sector"] || "") + "|" + (m["Boss"] || "");
+    if (!sectorMap[key]) sectorMap[key] = [];
+    sectorMap[key].push(m["Minion"]);
+  }
+  const fixups = []; // { questId, newMinion } pairs to sync back to Quests sheet
+  for (const q of quests) {
+    const key = (q["Sector"] || "") + "|" + (q["Boss"] || "");
+    const candidates = sectorMap[key];
+    let newName = null;
+    if (candidates && candidates.length === 1 && candidates[0] !== q["Minion"]) {
+      newName = candidates[0];
+    } else if (candidates && candidates.length > 1) {
+      const exact = candidates.find(c => c === q["Minion"]);
+      if (!exact) {
+        const prefixMatch = candidates.find(c => bookTitle(c) === bookTitle(q["Minion"]) || c.startsWith(q["Minion"].split("|")[0].trim()));
+        if (prefixMatch) newName = prefixMatch;
+      }
+    }
+    if (newName) {
+      fixups.push({ questId: q["Quest ID"], oldMinion: q["Minion"], newMinion: newName });
+      q["Minion"] = newName;
+    }
+  }
+  // Sync mismatched names back to Quests sheet in the background
+  if (fixups.length > 0 && sheets) {
+    syncQuestMinions(sheets, fixups).catch(err => console.error("Quest minion sync error:", err));
+  }
+}
+
+async function syncQuestMinions(sheets, fixups) {
+  const questsRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Quests",
+  });
+  const rows = questsRes.data.values;
+  if (!rows || rows.length < 2) return;
+  const headers = rows[0];
+  const idCol = headers.findIndex(h => h.toLowerCase() === "quest id");
+  const minionCol = headers.findIndex(h => h.toLowerCase() === "minion");
+  if (idCol < 0 || minionCol < 0) return;
+  const minionLetter = colLetter(minionCol);
+  const updates = [];
+  for (let i = 1; i < rows.length; i++) {
+    const fix = fixups.find(f => f.questId === (rows[i][idCol] || "") && f.oldMinion === (rows[i][minionCol] || ""));
+    if (fix) {
+      updates.push({ range: `Quests!${minionLetter}${i + 1}`, values: [[fix.newMinion]] });
+    }
+  }
+  if (updates.length > 0) {
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: "RAW", data: updates },
+    });
+    console.log(`Synced ${updates.length} quest minion name(s) from Sectors`);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -2411,6 +2663,8 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         background: #0a0b10;
     }
     .quest-status-row:hover { padding-left: 16px; }
+    .quest-status-today { color: #ffea00; border-color: #ffea00; box-shadow: 0 0 6px rgba(255,234,0,0.3); font-weight: bold; border-bottom: none; }
+    .quest-status-today:hover { background: #ffea00; color: #0a0b10; box-shadow: 0 0 12px rgba(255,234,0,0.5); }
     .quest-status-q { color: #ff8800; border-color: #ff8800; box-shadow: 0 0 6px rgba(255,136,0,0.2); border-bottom: none; }
     .quest-status-q:hover { background: #ff8800; color: #0a0b10; box-shadow: 0 0 12px rgba(255,136,0,0.4); }
     .quest-status-r { color: #00f2ff; border-color: #00f2ff; box-shadow: 0 0 6px rgba(0,242,255,0.2); }
@@ -2522,10 +2776,9 @@ const HTML_TEMPLATE = `<!DOCTYPE html>
         [[QUEST_STATUS_NAV]]
         [[NAV_NOTIFICATIONS]]
         <div class="nav-section-label">LINKS</div>
-        <a href="/today" class="nav-today">&#x1F4CB; TODAY</a>
+        <a href="/progress" class="nav-progress">&#x1F4CA; PROGRESS</a>
         <a href="/army" class="nav-army">[[ARMY_LINK]]</a>
         <a href="/badges" class="nav-badges">[[BADGES_LINK]]</a>
-        <a href="/progress" class="nav-progress">&#x1F4CA; PROGRESS</a>
         [[ADMIN_NAV]]
         <a href="/login" class="nav-user">[[USER_NAV]]</a>
     </nav>
@@ -2587,7 +2840,7 @@ function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSur
       <tr>
         <td>${questBtn}</td>
         <td title="${escHtml(m["Task"] || "")}">
-          ${escHtml(m["Minion"])}${recurTag}
+          ${escHtml(bookTitle(m["Minion"]))}${recurTag}
           ${prereqText ? `<div style="font-size:0.75em;color:#ff0044;margin-top:2px;text-transform:none;">Requires: ${escHtml(prereqText)}</div>` : ""}
         </td>
         <td style="color:${sc}; font-weight:bold;">${m["Status"]}</td>
@@ -3081,7 +3334,7 @@ app.get("/login", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Login page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -3171,7 +3424,7 @@ app.post("/login", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Login verify page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -3241,7 +3494,7 @@ h1 { color: #ffea00; text-shadow: 2px 2px #ff00ff; letter-spacing: 4px; margin: 
     res.redirect("/");
   } catch (err) {
     console.error("Verify error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -3286,7 +3539,7 @@ app.post("/login/add-user", async (req, res) => {
     res.redirect("/login?added=1");
   } catch (err) {
     console.error("Add user error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -3312,6 +3565,14 @@ h1{margin:0 0 10px;}a{color:#00f2ff;}</style></head>
 // Apply teacher middleware to all admin routes
 app.use("/admin", requireTeacher);
 
+// Invalidate caches on write operations (POST/PUT/DELETE modify sheet data)
+app.use((req, res, next) => {
+  if (req.method === "POST" || req.method === "PUT" || req.method === "DELETE") {
+    cacheInvalidateAll();
+  }
+  next();
+});
+
 // Require login for all routes below (login/logout are defined above)
 app.use((req, res, next) => {
   if (req.cookies && req.cookies.userEmail) return next();
@@ -3328,15 +3589,14 @@ app.get("/", async (req, res) => {
     const data = await fetchSheetData(sheets);
 
     // Quest data for badge + active indicators + recently enslaved
-    let activeQuestCount = 0;
     let activeQuestKeys = new Set();
     let recentEnslavedHtml = "";
     let quests = [];
     let questLogs = [];
+    let hudScheduleData = [];
     try {
-      [quests, questLogs] = await Promise.all([fetchQuestsData(sheets), fetchQuestLogData(sheets)]);
-      const activeQuests = quests.filter((q) => q["Status"] === "Active" && (q["Recurring"] || "").toUpperCase() !== "X");
-      activeQuestCount = activeQuests.length;
+      [quests, questLogs, hudScheduleData] = await Promise.all([fetchQuestsData(sheets), fetchQuestLogData(sheets), fetchScheduleData(sheets)]);
+      enrichQuestsFromSectors(quests, data.sectors, sheets);
       const onBoardQuests = quests.filter((q) => q["Status"] === "Active" || q["Status"] === "Submitted");
       for (const q of onBoardQuests) {
         activeQuestKeys.add(q["Boss"] + "|" + q["Minion"]);
@@ -3350,7 +3610,7 @@ app.get("/", async (req, res) => {
         const rows = recentEnslaved.map((q) =>
           `<div class="re-entry">
             <span class="re-date">${escHtml((q["Date Resolved"] || "").slice(0, 10))}</span>
-            <span class="re-minion">${escHtml(q["Minion"])}</span>
+            <span class="re-minion">${escHtml(bookTitle(q["Minion"]))}</span>
             <span class="re-arrow">&rarr;</span>
             <span class="re-boss">${escHtml(q["Boss"])}</span>
             <span class="re-sector">${escHtml(q["Sector"])}</span>
@@ -3362,7 +3622,7 @@ app.get("/", async (req, res) => {
             ${rows}
           </div>`;
       }
-    } catch { /* Quests sheet may not exist yet */ }
+    } catch (e) { console.error("Quest data error:", e.message); }
 
     // Badge evaluation and sync
     let badgeResult = { allEarned: [], newlyEarned: [] };
@@ -3380,29 +3640,19 @@ app.get("/", async (req, res) => {
     // Quest status nav for side nav
     const visibleQuests = quests.filter(q => q["Status"] !== "Abandoned" && q["Status"] !== "Approved" && (q["Recurring"] || "").toUpperCase() !== "X");
     const recurringQuests = getRecurringQuests(quests);
+    const hudToday = new Date().toISOString().slice(0, 10);
+    const hudTodayChapters = hudScheduleData.filter(s => (s["Scheduled Date"] || "").slice(0, 10) === hudToday);
+    const hudTodayDone = hudTodayChapters.filter(c => (c["Completed"] || "").toUpperCase() === "X").length;
 
     let questStatusNav = '<div class="quest-status-nav"><div class="quest-status-nav-title">MISSIONS</div>';
-    questStatusNav += `<a href="/quests" class="quest-status-row quest-status-q">QUESTS: ${activeQuestCount}</a>`;
-    questStatusNav += `<a href="/recurring" class="quest-status-row quest-status-r">RECURRING: ${recurringQuests.length}</a>`;
+    questStatusNav += `<a href="/today" class="quest-status-row quest-status-today">&#x1F4CB; TODAY</a>`;
+    questStatusNav += `<a href="/quests" class="quest-status-row quest-status-q">QUESTS: ${visibleQuests.length}</a>`;
+    questStatusNav += `<a href="/recurring" class="quest-status-row quest-status-r">BOOKS: ${hudTodayChapters.length > 0 ? hudTodayDone + "/" + hudTodayChapters.length + " TODAY" : recurringQuests.length}</a>`;
     questStatusNav += '</div>';
     html = html.split("[[QUEST_STATUS_NAV]]").join(questStatusNav);
 
-    // Nav notifications — streak + rejected alerts between MISSIONS and LINKS
-    let navNotifications = '';
-    const { currentStreak, bestStreak } = streakData;
-    if (currentStreak > 0) {
-      const isRecord = currentStreak >= bestStreak;
-      navNotifications += `<div class="nav-notif nav-streak${isRecord ? ' nav-streak-record' : ''}">` +
-        `\u{1F525} ${currentStreak} DAY STREAK` +
-        (isRecord ? ' <span class="nav-record-tag">RECORD!</span>' : ` (BEST: ${bestStreak})`) +
-        `</div>`;
-    }
-    const rejected = quests.filter((q) => q["Status"] === "Rejected");
-    if (rejected.length > 0) {
-      navNotifications += `<a href="/quests" class="nav-notif nav-rejected">` +
-        `\u{26A0} ${rejected.length} REJECTED</a>`;
-    }
-    html = html.split("[[NAV_NOTIFICATIONS]]").join(navNotifications);
+    // Nav notifications placeholder (cleared — streak + rejected alerts removed)
+    html = html.split("[[NAV_NOTIFICATIONS]]").join("");
 
     // Army count (Enslaved minions)
     html = html.split("[[ARMY_LINK]]").join(`&#x2694; HENRY'S ARMY`);
@@ -3428,14 +3678,9 @@ app.get("/", async (req, res) => {
     res.send(html);
   } catch (err) {
     console.error("HUD error:", err);
-    res.status(500).send(
-      `<pre style="background:#0a0b10;color:#ff0000;padding:20px;font-family:monospace;">` +
-      `SYSTEM ERROR\n\n${err.message}\n\n` +
-      `Check:\n` +
-      `  1. credentials.json exists in the project root\n` +
-      `  2. SPREADSHEET_ID is set in .env\n` +
-      `  3. The sheet is shared with the service account email</pre>`
-    );
+    res.status(500).send(errorPage(
+      `${err.message}\n\nCheck:\n  1. credentials.json exists in the project root\n  2. SPREADSHEET_ID is set in .env\n  3. The sheet is shared with the service account email`
+    ));
   }
 });
 
@@ -3485,7 +3730,7 @@ app.get("/boss/:bossName", async (req, res) => {
     res.send(buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSurvivalBoss));
   } catch (err) {
     console.error("Boss page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -3526,7 +3771,7 @@ function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBo
         <tr>
           <td>${questBtn}</td>
           <td title="${escHtml(m["Task"] || "")}">
-            ${escHtml(m["Minion"])}${recurTag}
+            ${escHtml(bookTitle(m["Minion"]))}${recurTag}
             ${spText ? `<div style="font-size:0.75em;color:#ff0044;margin-top:2px;text-transform:none;">Requires: ${escHtml(spText)}</div>` : ""}
           </td>
           <td style="color:${sc}; font-weight:bold;">${m["Status"]}</td>
@@ -3735,7 +3980,7 @@ app.get("/sector/:sectorName", async (req, res) => {
     res.send(buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBossNames));
   } catch (err) {
     console.error("Sector page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -3774,7 +4019,7 @@ function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
       rows += `
         <tr>
           <td>${questBtn}</td>
-          <td title="${escHtml(m["Task"] || "")}">${escHtml(m["Minion"])}${recurTag}</td>
+          <td title="${escHtml(m["Task"] || "")}">${escHtml(bookTitle(m["Minion"]))}${recurTag}</td>
           <td style="color:${sc}; font-weight:bold;">${m["Status"]}</td>
           <td>${nInt}</td>
           <td>${nSta}</td>
@@ -4009,7 +4254,7 @@ app.get("/guardians", async (req, res) => {
     res.send(buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys));
   } catch (err) {
     console.error("Guardians page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -4108,9 +4353,7 @@ function buildQuestBoardPage(cardHtml, expandHtml, activeCount, totalCount, recu
         font-size: 0.75em;
         font-weight: bold;
         color: #00f2ff;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
+        word-break: break-word;
     }
     .qc-boss {
         display: block;
@@ -4295,6 +4538,33 @@ function buildQuestBoardPage(cardHtml, expandHtml, activeCount, totalCount, recu
     .quest-date { font-size: 0.7em; color: #555; }
     .quest-proof-link { font-size: 0.75em; color: #555; text-transform: none; }
     .no-quests { text-align: center; color: #555; padding: 40px; font-size: 0.9em; }
+    /* Task edit controls (teacher) */
+    .qt-edit-btn {
+        background: none; border: none; color: #ff00ff; cursor: pointer;
+        font-size: 0.9em; padding: 0 4px; opacity: 0.6; transition: opacity 0.2s;
+    }
+    .qt-edit-btn:hover { opacity: 1; }
+    .qt-edit-area { margin-top: 6px; }
+    .qt-textarea {
+        width: 100%; background: #1a1d26; border: 1px solid #ff00ff;
+        color: #ccc; padding: 6px 10px; font-family: 'Courier New', monospace;
+        font-size: 0.9em; text-transform: none; resize: vertical;
+        min-height: 40px; box-sizing: border-box;
+    }
+    .qt-textarea:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
+    .qt-edit-btns { display: flex; gap: 8px; margin-top: 4px; }
+    .qt-save-btn {
+        background: none; border: 1px solid #00ff9d; color: #00ff9d;
+        padding: 3px 12px; font-family: 'Courier New', monospace;
+        font-size: 0.7em; cursor: pointer; transition: all 0.2s;
+    }
+    .qt-save-btn:hover { background: #00ff9d; color: #0a0b10; }
+    .qt-cancel-btn {
+        background: none; border: 1px solid #555; color: #888;
+        padding: 3px 12px; font-family: 'Courier New', monospace;
+        font-size: 0.7em; cursor: pointer; transition: all 0.2s;
+    }
+    .qt-cancel-btn:hover { background: #555; color: #0a0b10; }
     @media (max-width: 600px) {
         body { padding: 10px; }
         .hud-container { padding: 15px; }
@@ -4352,6 +4622,30 @@ function buildQuestBoardPage(cardHtml, expandHtml, activeCount, totalCount, recu
             if (timeInput) timeInput.addEventListener('input', check);
         });
     })();
+    function editQuestTask(qid, questId) {
+        document.getElementById('qt-text-' + qid).style.display = 'none';
+        document.getElementById('qt-editbtn-' + qid).style.display = 'none';
+        document.getElementById('qt-edit-' + qid).style.display = '';
+        document.getElementById('qt-input-' + qid).focus();
+    }
+    function cancelQuestTask(qid) {
+        document.getElementById('qt-text-' + qid).style.display = '';
+        document.getElementById('qt-editbtn-' + qid).style.display = '';
+        document.getElementById('qt-edit-' + qid).style.display = 'none';
+    }
+    function saveQuestTask(qid, questId) {
+        var newTask = document.getElementById('qt-input-' + qid).value.trim();
+        fetch('/quest/update-task', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ questId: questId, task: newTask })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.success) {
+                document.getElementById('qt-text-' + qid).textContent = newTask || 'No task details.';
+                cancelQuestTask(qid);
+            } else { alert('Error: ' + (data.error || 'Unknown')); }
+        }).catch(function(e) { alert('Error: ' + e.message); });
+    }
     </script>
 </body>
 </html>`;
@@ -4370,14 +4664,14 @@ app.post("/quest/start", async (req, res) => {
     const sheets = await getSheets();
     await ensureQuestsSheet(sheets);
 
-    const [defRes, sectorsRes, questsRes] = await Promise.all([
-      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Definitions" }),
-      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Sectors" }),
-      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Quests" }),
-    ]);
-    const definitions = parseTable(defRes.data.values);
-    const sectorsRows = parseTable(sectorsRes.data.values);
-    const questRows = questsRes.data.values || [];
+    const batchRes = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId: SPREADSHEET_ID,
+      ranges: ["Definitions", "Sectors", "Quests"],
+    });
+    const [defRaw, sectorsRaw, questsRaw] = batchRes.data.valueRanges;
+    const definitions = parseTable(defRaw.values);
+    const sectorsRows = parseTable(sectorsRaw.values);
+    const questRows = questsRaw.values || [];
 
     const { proofType, suggestion: fallbackSuggestion } = generateProofSuggestion(sector, definitions);
 
@@ -4414,7 +4708,7 @@ app.post("/quest/start", async (req, res) => {
     res.redirect(isRecurring ? "/recurring" : "/quests");
   } catch (err) {
     console.error("Quest start error:", err);
-    res.status(500).send(`<pre style="color:red">Error starting quest: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -4431,14 +4725,14 @@ app.post("/quest/start-batch", async (req, res) => {
     const sheets = await getSheets();
     await ensureQuestsSheet(sheets);
 
-    const [defRes, sectorsRes, questsRes] = await Promise.all([
-      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Definitions" }),
-      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Sectors" }),
-      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Quests" }),
-    ]);
-    const definitions = parseTable(defRes.data.values);
-    const sectorsRows = parseTable(sectorsRes.data.values);
-    const questRows = questsRes.data.values || [];
+    const batchRes = await sheets.spreadsheets.values.batchGet({
+      spreadsheetId: SPREADSHEET_ID,
+      ranges: ["Definitions", "Sectors", "Quests"],
+    });
+    const [defRaw, sectorsRaw, questsRaw] = batchRes.data.valueRanges;
+    const definitions = parseTable(defRaw.values);
+    const sectorsRows = parseTable(sectorsRaw.values);
+    const questRows = questsRaw.values || [];
 
     const today = new Date().toISOString().slice(0, 10);
     const recCol = findRecurringCol(sectorsRows);
@@ -4481,17 +4775,18 @@ app.post("/quest/start-batch", async (req, res) => {
       });
     }
 
-    // Sync Quest Status to Sectors for each item
-    for (const item of items) {
-      if (item.boss && item.minion && item.sector) {
-        await updateSectorsQuestStatus(sheets, item.sector, item.boss, item.minion, "Active", { dueDate: dueDate || "" });
-      }
+    // Batch sync Quest Status to Sectors in one API call
+    const batchItems = items
+      .filter(item => item.boss && item.minion && item.sector)
+      .map(item => ({ sector: item.sector, boss: item.boss, minion: item.minion, questStatus: "Active", options: { dueDate: dueDate || "" } }));
+    if (batchItems.length > 0) {
+      await batchUpdateSectorsQuestStatus(sheets, batchItems);
     }
 
     res.redirect(hasRecurring ? "/recurring" : (redirect || "/quests"));
   } catch (err) {
     console.error("Quest start-batch error:", err);
-    res.status(500).send(`<pre style="color:red">Error starting quests: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -4532,30 +4827,30 @@ app.post("/quest/submit", async (req, res) => {
 
     const updates = [];
     updates.push({
-      range: "Quests!" + String.fromCharCode(65 + statusCol) + targetRowIdx,
+      range: `Quests!${colLetter(statusCol)}${targetRowIdx}`,
       values: [["Submitted"]],
     });
     if (artifactType && proofTypeCol >= 0) {
       updates.push({
-        range: "Quests!" + String.fromCharCode(65 + proofTypeCol) + targetRowIdx,
+        range: `Quests!${colLetter(proofTypeCol)}${targetRowIdx}`,
         values: [[artifactType]],
       });
     }
     if (proofLink) {
       updates.push({
-        range: "Quests!" + String.fromCharCode(65 + proofLinkCol) + targetRowIdx,
+        range: `Quests!${colLetter(proofLinkCol)}${targetRowIdx}`,
         values: [[proofLink]],
       });
     }
     updates.push({
-      range: "Quests!" + String.fromCharCode(65 + dateCol) + targetRowIdx,
+      range: `Quests!${colLetter(dateCol)}${targetRowIdx}`,
       values: [[new Date().toISOString().split("T")[0]]],
     });
     // Clear old feedback on resubmission
     const feedbackCol = headerRow.indexOf("Feedback");
     if (feedbackCol >= 0) {
       updates.push({
-        range: "Quests!" + String.fromCharCode(65 + feedbackCol) + targetRowIdx,
+        range: `Quests!${colLetter(feedbackCol)}${targetRowIdx}`,
         values: [[""]],
       });
     }
@@ -4563,7 +4858,7 @@ app.post("/quest/submit", async (req, res) => {
     const dateResolvedCol = headerRow.indexOf("Date Resolved");
     if (dateResolvedCol >= 0) {
       updates.push({
-        range: "Quests!" + String.fromCharCode(65 + dateResolvedCol) + targetRowIdx,
+        range: `Quests!${colLetter(dateResolvedCol)}${targetRowIdx}`,
         values: [[""]],
       });
     }
@@ -4571,14 +4866,14 @@ app.post("/quest/submit", async (req, res) => {
     const reflectionCol = headerRow.indexOf("Reflection");
     if (reflectionCol >= 0) {
       updates.push({
-        range: "Quests!" + String.fromCharCode(65 + reflectionCol) + targetRowIdx,
+        range: `Quests!${colLetter(reflectionCol)}${targetRowIdx}`,
         values: [[reflection || ""]],
       });
     }
     const timeSpentCol = headerRow.indexOf("Time Spent");
     if (timeSpentCol >= 0) {
       updates.push({
-        range: "Quests!" + String.fromCharCode(65 + timeSpentCol) + targetRowIdx,
+        range: `Quests!${colLetter(timeSpentCol)}${targetRowIdx}`,
         values: [[timeSpent ? String(timeSpent) : ""]],
       });
     }
@@ -4599,7 +4894,7 @@ app.post("/quest/submit", async (req, res) => {
     res.redirect("/quests");
   } catch (err) {
     console.error("Quest submit error:", err);
-    res.status(500).send(`<pre style="color:red">Error submitting quest: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -4657,7 +4952,7 @@ app.post("/quest/remove", requireTeacher, async (req, res) => {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Quests!A${targetRowIdx + 1}:${String.fromCharCode(64 + headers.length)}${targetRowIdx + 1}`,
+      range: `Quests!A${targetRowIdx + 1}:${colLetter(headers.length - 1)}${targetRowIdx + 1}`,
       valueInputOption: "RAW",
       requestBody: { values: [updatedRow] },
     });
@@ -4665,18 +4960,63 @@ app.post("/quest/remove", requireTeacher, async (req, res) => {
     res.redirect("/quests");
   } catch (err) {
     console.error("Quest remove error:", err);
-    res.status(500).send(`<pre style="color:red">Error removing quest: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Update quest task text (teacher only)
+// ---------------------------------------------------------------------------
+app.post("/quest/update-task", requireTeacher, async (req, res) => {
+  try {
+    const { questId, task } = req.body;
+    if (!questId) return res.status(400).json({ error: "Missing questId" });
+
+    const sheets = await getSheets();
+    const questsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quests",
+    });
+    const rows = questsRes.data.values;
+    if (!rows || rows.length < 2) return res.status(404).json({ error: "No quests found" });
+
+    const headers = rows[0];
+    const idCol = headers.indexOf("Quest ID");
+    const taskCol = headers.indexOf("Suggested By AI");
+    if (idCol < 0 || taskCol < 0) return res.status(500).json({ error: "Missing required columns" });
+
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][idCol] === questId) {
+        targetRow = i + 1; // 1-based sheet row
+        break;
+      }
+    }
+    if (targetRow === -1) return res.status(404).json({ error: "Quest not found" });
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Quests!${colLetter(taskCol)}${targetRow}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[task || ""]] },
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Update quest task error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
 app.get("/quests", async (req, res) => {
   try {
     const sheets = await getSheets();
-    const [quests, defRes] = await Promise.all([
+    const [quests, sheetData] = await Promise.all([
       fetchQuestsData(sheets),
-      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Definitions" }),
+      fetchSheetData(sheets),
     ]);
-    const definitions = parseTable(defRes.data.values);
+    enrichQuestsFromSectors(quests, sheetData.sectors, sheets);
+    const definitions = sheetData.definitions;
     const artifactOptions = getArtifactOptions(definitions);
 
     const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Approved: "#00ff9d", Rejected: "#ff0044" };
@@ -4764,7 +5104,7 @@ app.get("/quests", async (req, res) => {
         <div class="qc-card${isOverdue ? " qc-card-overdue" : ""}" data-qid="${qid}" onclick="toggleQuest('${qid}')">
           <div class="qc-summary">
             <div class="qc-left">
-              <span class="qc-minion">${escHtml(q["Minion"])}</span>
+              <span class="qc-minion">${escHtml(bookTitle(q["Minion"]))}</span>
               <span class="qc-boss">${escHtml(q["Boss"])}</span>
             </div>
             <div class="qc-right">
@@ -4780,14 +5120,23 @@ app.get("/quests", async (req, res) => {
         <div class="qc-expand" id="qe-${qid}">
           <div class="qc-expand-inner">
             <div class="qc-expand-header">
-              <span class="qc-expand-name">${escHtml(q["Boss"])} &gt; ${escHtml(q["Minion"])}</span>
+              <span class="qc-expand-name">${escHtml(q["Boss"])} &gt; ${escHtml(bookTitle(q["Minion"]))}</span>
               <span class="qc-id">${q["Quest ID"]}</span>
             </div>
             <div class="quest-sector">SECTOR: ${escHtml(q["Sector"])}</div>
             ${subjectDisplay}
             ${isRejected && q["Feedback"] ? `<div class="qc-reject-reason">REJECTED: ${escHtml(q["Feedback"])}</div>` : ""}
-            <div class="quest-suggestion">
-              <span class="quest-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details."}
+            <div class="quest-suggestion" id="qt-${qid}">
+              <span class="quest-task-label">TASK:</span>
+              <span class="qt-text" id="qt-text-${qid}">${q["Suggested By AI"] || "No task details."}</span>
+              ${isTeacher ? `<button class="qt-edit-btn" id="qt-editbtn-${qid}" onclick="editQuestTask('${qid}','${escHtml(q["Quest ID"])}')" title="Edit task">&#9998;</button>
+              <div class="qt-edit-area" id="qt-edit-${qid}" style="display:none;">
+                <textarea class="qt-textarea" id="qt-input-${qid}" rows="3">${escHtml(q["Suggested By AI"] || "")}</textarea>
+                <div class="qt-edit-btns">
+                  <button class="qt-save-btn" onclick="saveQuestTask('${qid}','${escHtml(q["Quest ID"])}')">SAVE</button>
+                  <button class="qt-cancel-btn" onclick="cancelQuestTask('${qid}')">CANCEL</button>
+                </div>
+              </div>` : ""}
             </div>
             <div class="quest-footer">
               ${submitForm}
@@ -4803,7 +5152,7 @@ app.get("/quests", async (req, res) => {
     res.send(buildQuestBoardPage(cardHtml, expandHtml, activeCount, visible.length, recurringCount));
   } catch (err) {
     console.error("Quest board error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -4840,10 +5189,13 @@ const MOTIVATIONAL_QUOTES = [
 app.get("/today", async (req, res) => {
   try {
     const sheets = await getSheets();
-    const [quests, questLogs] = await Promise.all([
+    const [quests, questLogs, scheduleData, sheetData] = await Promise.all([
       fetchQuestsData(sheets),
       fetchQuestLogData(sheets),
+      fetchScheduleData(sheets),
+      fetchSheetData(sheets),
     ]);
+    enrichQuestsFromSectors(quests, sheetData.sectors, sheets);
 
     const today = new Date().toISOString().slice(0, 10);
     const dayName = new Date().toLocaleDateString("en-US", { weekday: "long" }).toUpperCase();
@@ -4872,14 +5224,21 @@ app.get("/today", async (req, res) => {
       return 0;
     });
 
-    // 2. Recurring quests not yet logged today
+    // 2. Today's scheduled reading chapters + overdue chapters
     const recurringQuests = getRecurringQuests(quests);
-    const loggedTodayIds = new Set();
-    for (const log of questLogs) {
-      if ((log["Date"] || "").slice(0, 10) === today) loggedTodayIds.add(log["Quest ID"]);
-    }
-    const unloggedRecurring = recurringQuests.filter(q => !loggedTodayIds.has(q["Quest ID"]));
-    const loggedRecurring = recurringQuests.filter(q => loggedTodayIds.has(q["Quest ID"]));
+    const questMap = {};
+    for (const q of recurringQuests) questMap[q["Quest ID"]] = q;
+    const todayChapters = scheduleData.filter(s => (s["Scheduled Date"] || "").slice(0, 10) === today);
+    todayChapters.sort((a, b) => (parseInt(a["Chapter"]) || 0) - (parseInt(b["Chapter"]) || 0));
+    const todayDone = todayChapters.filter(c => (c["Completed"] || "").toUpperCase() === "X");
+    const todayPending = todayChapters.filter(c => (c["Completed"] || "").toUpperCase() !== "X");
+
+    // Overdue reading chapters (scheduled before today, not completed)
+    const overdueChapters = scheduleData.filter(s => {
+      const sd = (s["Scheduled Date"] || "").slice(0, 10);
+      return sd && sd < today && (s["Completed"] || "").toUpperCase() !== "X" && questMap[s["Quest ID"]];
+    });
+    overdueChapters.sort((a, b) => (a["Scheduled Date"] || "").localeCompare(b["Scheduled Date"] || "") || (parseInt(a["Chapter"]) || 0) - (parseInt(b["Chapter"]) || 0));
 
     // 3. Recent completions with reflections (last 5 approved)
     const recentCompleted = quests
@@ -4906,7 +5265,7 @@ app.get("/today", async (req, res) => {
         activeHtml += `
           <a href="/quests" class="today-card-link"><div class="today-card${isOverdue ? " today-card-overdue" : ""}">
             <div class="today-card-top">
-              <span class="today-minion">${escHtml(q["Minion"])}</span>
+              <span class="today-minion">${escHtml(bookTitle(q["Minion"]))}</span>
               <div class="today-badges">${rejectBadge}${dueBadge}</div>
             </div>
             <div class="today-card-meta">
@@ -4918,28 +5277,44 @@ app.get("/today", async (req, res) => {
       }
     }
 
-    // Build unlogged recurring HTML
+    // Build today's reading HTML (overdue + today's pending)
     let recurringHtml = "";
-    if (unloggedRecurring.length === 0 && loggedRecurring.length === 0) {
-      recurringHtml = '<div class="today-empty">NO RECURRING QUESTS ACTIVE.</div>';
-    } else if (unloggedRecurring.length === 0) {
-      recurringHtml = `<div class="today-all-done">ALL ${recurringQuests.length} RECURRING QUESTS LOGGED TODAY!</div>`;
-    } else {
-      for (const q of unloggedRecurring) {
+    // Overdue chapters first
+    if (overdueChapters.length > 0) {
+      for (const ch of overdueChapters) {
+        const q = questMap[ch["Quest ID"]];
+        if (!q) continue;
+        recurringHtml += `
+          <a href="/recurring" class="today-card-link"><div class="today-card today-card-overdue">
+            <div class="today-card-top">
+              <span class="today-minion">${escHtml(bookTitle(q["Minion"]))} — CH ${escHtml(ch["Chapter"])}</span>
+              <span class="today-badge today-overdue">OVERDUE</span>
+            </div>
+            ${ch["Details"] ? `<div class="today-task">${escHtml(ch["Details"])}</div>` : ""}
+          </div></a>`;
+      }
+    }
+    // Today's pending
+    if (todayPending.length > 0) {
+      for (const ch of todayPending) {
+        const q = questMap[ch["Quest ID"]];
+        if (!q) continue;
         recurringHtml += `
           <a href="/recurring" class="today-card-link"><div class="today-card today-card-recurring">
             <div class="today-card-top">
-              <span class="today-minion">${escHtml(q["Minion"])}</span>
-              <span class="today-badge today-unlogged">NOT LOGGED</span>
+              <span class="today-minion">${escHtml(bookTitle(q["Minion"]))} — CH ${escHtml(ch["Chapter"])}</span>
+              <span class="today-badge today-unlogged">PENDING</span>
             </div>
-            <div class="today-card-meta">
-              <span class="today-boss">${escHtml(q["Boss"])}</span>
-            </div>
+            ${ch["Details"] ? `<div class="today-task">${escHtml(ch["Details"])}</div>` : ""}
           </div></a>`;
       }
-      if (loggedRecurring.length > 0) {
-        recurringHtml += `<div class="today-logged-note">${loggedRecurring.length} of ${recurringQuests.length} already logged today</div>`;
-      }
+    }
+    if (overdueChapters.length === 0 && todayChapters.length === 0) {
+      recurringHtml = '<div class="today-empty">NO READING SCHEDULED FOR TODAY.</div>';
+    } else if (overdueChapters.length === 0 && todayPending.length === 0) {
+      recurringHtml = `<div class="today-all-done">ALL ${todayChapters.length} CHAPTERS DONE TODAY!</div>`;
+    } else if (todayDone.length > 0) {
+      recurringHtml += `<div class="today-logged-note">${todayDone.length} of ${todayChapters.length} chapters already done today</div>`;
     }
 
     // Build submitted HTML
@@ -4950,7 +5325,7 @@ app.get("/today", async (req, res) => {
         submittedHtml += `
           <a href="${submittedLink}" class="today-card-link"><div class="today-card today-card-submitted">
             <div class="today-card-top">
-              <span class="today-minion">${escHtml(q["Minion"])}</span>
+              <span class="today-minion">${escHtml(bookTitle(q["Minion"]))}</span>
               <span class="today-badge today-submitted-badge">AWAITING REVIEW</span>
             </div>
             <div class="today-card-meta">
@@ -4971,7 +5346,7 @@ app.get("/today", async (req, res) => {
         recentHtml += `
           <a href="/progress" class="today-card-link"><div class="today-card today-card-victory">
             <div class="today-card-top">
-              <span class="today-minion">${escHtml(q["Minion"])}</span>
+              <span class="today-minion">${escHtml(bookTitle(q["Minion"]))}</span>
               <span class="today-date">${q["Date Resolved"] || ""}</span>
             </div>
             <div class="today-card-meta">
@@ -5178,7 +5553,7 @@ app.get("/today", async (req, res) => {
         <div class="nav-links">
             <a class="back-link" href="/">&lt; HUD</a>
             <a class="back-link" href="/quests">QUESTS</a>
-            <a class="back-link" href="/recurring">RECURRING</a>
+            <a class="back-link" href="/recurring">SCHEDULE</a>
         </div>
         <h1>MISSION BRIEFING</h1>
         <div class="today-date-display">${dayName} // ${dateDisplay}</div>
@@ -5195,9 +5570,9 @@ app.get("/today", async (req, res) => {
             <a href="/quests" class="today-section-link"><div class="today-section-header">ACTIVE OPERATIONS <span class="section-count">(${sortedActive.length})</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${activeHtml}
         </div>` : ""}
-        ${recurringQuests.length > 0 ? `
+        ${todayChapters.length > 0 || overdueChapters.length > 0 || recurringQuests.length > 0 ? `
         <div class="today-section section-recurring">
-            <a href="/recurring" class="today-section-link"><div class="today-section-header">RECURRING DRILLS <span class="section-count">(${unloggedRecurring.length} remaining)</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
+            <a href="/recurring" class="today-section-link"><div class="today-section-header">READING${overdueChapters.length > 0 ? ` <span class="section-count">(${overdueChapters.length} overdue)</span>` : todayPending.length > 0 ? ` <span class="section-count">(${todayPending.length} pending)</span>` : ""} <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${recurringHtml}
         </div>` : ""}
         ${submitted.length > 0 ? `
@@ -5214,7 +5589,7 @@ app.get("/today", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Today page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -5222,13 +5597,134 @@ app.get("/today", async (req, res) => {
 // Recurring Quest Page + Routes
 // ---------------------------------------------------------------------------
 
-function buildRecurringPage(cardHtml, expandHtml, totalCount, loggedCount, isTeacher) {
-  return `<!DOCTYPE html>
+app.get("/recurring", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [quests, schedule, sheetData] = await Promise.all([
+      fetchQuestsData(sheets),
+      fetchScheduleData(sheets),
+      fetchSheetData(sheets),
+    ]);
+    enrichQuestsFromSectors(quests, sheetData.sectors, sheets);
+
+    const recurringQuests = quests.filter(q =>
+      (q["Recurring"] || "").toUpperCase() === "X" &&
+      q["Status"] !== "Abandoned" && q["Status"] !== "Approved"
+    );
+
+    // Build quest lookup
+    const questMap = {};
+    for (const q of recurringQuests) questMap[q["Quest ID"]] = q;
+
+    const today = new Date().toISOString().slice(0, 10);
+
+    // Collect overdue + next upcoming per book, grouped together
+    const overdueByQuest = {}; // questId -> [chapters]
+    const nextPerBook = {};    // questId -> single chapter
+
+    for (const s of schedule) {
+      const sd = (s["Scheduled Date"] || "").slice(0, 10);
+      if (!sd) continue;
+      const q = questMap[s["Quest ID"]];
+      if (!q) continue;
+      const isDone = (s["Completed"] || "").toUpperCase() === "X";
+      const qid = s["Quest ID"];
+
+      if (sd < today && !isDone) {
+        if (!overdueByQuest[qid]) overdueByQuest[qid] = [];
+        overdueByQuest[qid].push({ ...s, quest: q });
+      } else if (sd >= today && !isDone) {
+        if (!nextPerBook[qid] || sd < (nextPerBook[qid]["Scheduled Date"] || "").slice(0, 10) ||
+            (sd === (nextPerBook[qid]["Scheduled Date"] || "").slice(0, 10) && (parseInt(s["Chapter"]) || 0) < (parseInt(nextPerBook[qid]["Chapter"]) || 0))) {
+          nextPerBook[qid] = { ...s, quest: q };
+        }
+      }
+    }
+
+    // Sort overdue within each book by date then chapter
+    for (const qid of Object.keys(overdueByQuest)) {
+      overdueByQuest[qid].sort((a, b) => (a["Scheduled Date"] || "").localeCompare(b["Scheduled Date"] || "") || (parseInt(a["Chapter"]) || 0) - (parseInt(b["Chapter"]) || 0));
+    }
+
+    // Build unified book list: all quest IDs that have overdue or upcoming
+    const allQuestIds = new Set([...Object.keys(overdueByQuest), ...Object.keys(nextPerBook)]);
+    const bookGroups = [];
+    for (const qid of allQuestIds) {
+      const overdueChapters = overdueByQuest[qid] || [];
+      const nextChapter = nextPerBook[qid] || null;
+      const quest = overdueChapters.length > 0 ? overdueChapters[0].quest : nextChapter.quest;
+      bookGroups.push({ qid, quest, overdueChapters, nextChapter });
+    }
+    // Sort books: those with overdue first, then by book name
+    bookGroups.sort((a, b) => {
+      const aHasOverdue = a.overdueChapters.length > 0 ? 0 : 1;
+      const bHasOverdue = b.overdueChapters.length > 0 ? 0 : 1;
+      if (aHasOverdue !== bHasOverdue) return aHasOverdue - bHasOverdue;
+      return (a.quest["Minion"] || "").localeCompare(b.quest["Minion"] || "");
+    });
+
+    const isTeacher = req.cookies && req.cookies.role === "teacher";
+
+    function buildCard(ch, extraClass) {
+      const time = parseInt(ch["Time"] || "0") || 0;
+      const sd = (ch["Scheduled Date"] || "").slice(0, 10);
+      const isDone = (ch["Completed"] || "").toUpperCase() === "X";
+      const dateDisplay = new Date(sd + "T12:00:00").toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" });
+      const details = ch["Details"] || "";
+      const cardId = (ch["Quest ID"] + "_" + ch["Chapter"]).replace(/[^a-zA-Z0-9]/g, "_");
+      let detailsHtml = "";
+      if (details || isTeacher) {
+        if (isTeacher) {
+          detailsHtml = `<div class="sched-details">
+            <span class="sched-details-text" id="sdt-${cardId}">${details ? escHtml(details) : '<span style="color:#555;font-style:italic;">No details</span>'}</span>
+            <input type="text" class="sched-details-input" id="sdi-${cardId}" value="${escHtml(details)}" style="display:none;" placeholder="Instructions..." onkeydown="if(event.key==='Enter'){event.preventDefault();saveDetails('${cardId}','${escHtml(ch["Quest ID"])}','${escHtml(ch["Chapter"])}');}">
+            <span class="sched-details-edit" id="sde-${cardId}" onclick="toggleDetails('${cardId}')" title="Edit details">&#x270E;</span>
+            <button class="sched-details-save" id="sds-${cardId}" onclick="saveDetails('${cardId}','${escHtml(ch["Quest ID"])}','${escHtml(ch["Chapter"])}')" style="display:none;">&#x2713;</button>
+          </div>`;
+        } else if (details) {
+          detailsHtml = `<div class="sched-details"><span class="sched-details-text">${escHtml(details)}</span></div>`;
+        }
+      }
+      return `
+        <div class="sched-card${isDone ? " sched-done" : ""}${extraClass ? " " + extraClass : ""}">
+          <div class="sched-card-row">
+            <span class="sched-icon">${isDone ? "&#x2705;" : "&#x1F4D6;"}</span>
+            <div class="sched-chapter">CH ${escHtml(ch["Chapter"])} <span class="sched-date">${dateDisplay}</span>${time > 0 ? ` <span class="sched-time">${time} MIN</span>` : ""}</div>
+          </div>
+          ${detailsHtml}
+        </div>`;
+    }
+
+    let booksHtml = "";
+    if (bookGroups.length > 0) {
+      let totalMin = 0;
+      for (const bg of bookGroups) {
+        booksHtml += `<div class="sched-book-group">
+          <div class="sched-book-header">${escHtml(bookTitle(bg.quest["Minion"]))}</div>
+          <div class="sched-list">`;
+        for (const ch of bg.overdueChapters) {
+          booksHtml += buildCard(ch, "sched-card-overdue");
+          totalMin += parseInt(ch["Time"] || "0") || 0;
+        }
+        if (bg.nextChapter) {
+          booksHtml += buildCard(bg.nextChapter, "");
+          totalMin += parseInt(bg.nextChapter["Time"] || "0") || 0;
+        }
+        booksHtml += `</div></div>`;
+      }
+      if (totalMin > 0) booksHtml += `<div class="sched-section-total">${totalMin} MIN TOTAL</div>`;
+    }
+
+    const emptyMsg = bookGroups.length === 0
+      ? '<div class="no-schedule">NO OVERDUE OR UPCOMING ITEMS. YOU\'RE ALL CAUGHT UP!</div>'
+      : "";
+
+    res.send(`<!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-    <title>Recurring Quests - Sovereign HUD</title>
+    <title>Reading Schedule - Sovereign HUD</title>
     <style>
     body {
         background: #0a0b10;
@@ -5265,237 +5761,102 @@ function buildRecurringPage(cardHtml, expandHtml, totalCount, loggedCount, isTea
     }
     .back-link:hover { background: #00f2ff; color: #0a0b10; }
     .nav-links { display: flex; gap: 10px; margin-bottom: 15px; }
-    .quest-stats {
-        text-align: center;
-        margin-bottom: 20px;
-        font-size: 0.85em;
-        color: #00f2ff;
-    }
-    .quest-stats span { color: #ffea00; }
 
-    /* Compact recurring card grid */
-    .rc-grid {
-        display: grid;
-        grid-template-columns: repeat(2, 1fr);
-        grid-auto-flow: dense;
-        gap: 8px;
-    }
-    .rc-card {
-        border: 1px solid rgba(0, 242, 255, 0.25);
-        background: rgba(0, 242, 255, 0.03);
-        padding: 8px 10px;
-        cursor: pointer;
-        transition: border-color 0.2s, box-shadow 0.2s, transform 0.15s;
-        min-width: 0;
-        overflow: hidden;
-    }
-    .rc-card:hover {
-        border-color: rgba(0, 242, 255, 0.6);
-        box-shadow: 0 0 10px rgba(0, 242, 255, 0.15);
-        transform: translateY(-1px);
-    }
-    .rc-card.active {
-        border-color: #00f2ff;
-        box-shadow: 0 0 15px rgba(0, 242, 255, 0.3);
-    }
-    .rc-card-logged { opacity: 0.5; }
-    .rc-card-logged:hover { opacity: 0.85; }
-    .rc-summary {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 8px;
-    }
-    .rc-left { min-width: 0; overflow: hidden; }
-    .rc-minion {
-        display: block;
-        font-size: 0.75em;
-        font-weight: bold;
-        color: #00f2ff;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .rc-boss {
-        display: block;
-        font-size: 0.55em;
-        color: #666;
-        white-space: nowrap;
-        overflow: hidden;
-        text-overflow: ellipsis;
-    }
-    .rc-right {
-        flex-shrink: 0;
-        text-align: right;
-        display: flex;
-        align-items: center;
-        gap: 5px;
-    }
-    .rc-status { font-size: 0.6em; font-weight: bold; letter-spacing: 1px; }
-    .rc-log-count { font-size: 0.5em; color: #555; }
-    .rc-logged-badge { font-size: 0.8em; }
-    .rc-reject-badge {
-        display: inline-block;
-        width: 16px; height: 16px;
-        background: #ff0044;
-        color: #fff;
-        font-size: 0.6em;
-        font-weight: bold;
-        text-align: center;
-        line-height: 16px;
-        border-radius: 50%;
-        flex-shrink: 0;
+    /* Section totals */
+    .sched-section-total {
+        font-size: 0.7em; color: #ff8800; text-align: right;
+        padding: 4px 12px; letter-spacing: 1px; margin-top: 4px;
     }
 
-    /* Detail area below card grid */
-    .rc-detail-area { margin-top: 12px; }
-    .rc-expand {
-        display: none;
-        min-width: 0;
-        overflow: hidden;
-    }
-    .rc-expand.open { display: block; }
-    .rc-expand-inner {
-        border: 1px solid rgba(0, 242, 255, 0.3);
-        border-top: 2px solid #00f2ff;
-        background: rgba(0, 242, 255, 0.03);
-        padding: 14px;
-        animation: rcFade 0.3s ease;
-        overflow: hidden;
-        min-width: 0;
-    }
-    @keyframes rcFade {
-        from { opacity: 0; transform: translateY(-6px); }
-        to { opacity: 1; transform: translateY(0); }
-    }
-    .rc-expand-header {
+    /* List layout */
+    .sched-list {
         display: flex;
-        justify-content: space-between;
-        align-items: baseline;
-        margin-bottom: 8px;
-        padding-bottom: 6px;
-        border-bottom: 1px solid rgba(0, 242, 255, 0.15);
-    }
-    .rc-expand-name {
-        font-size: 0.9em;
-        font-weight: bold;
-        color: #00f2ff;
-        letter-spacing: 2px;
-    }
-    .rc-id { font-size: 0.65em; color: #555; }
-    .rc-reject-reason {
-        font-size: 0.75em; color: #ff0044; margin-bottom: 6px;
-        text-transform: none;
-        padding: 4px 8px;
-        background: rgba(255,0,68,0.06);
-        border-left: 2px solid #ff0044;
-    }
-    .rc-separator {
-        grid-column: 1 / -1;
-        text-align: center;
-        margin: 10px 0;
-        border-top: 1px solid rgba(0, 255, 157, 0.25);
-        position: relative;
-    }
-    .rc-separator span {
-        background: #0a0b10; color: #00ff9d; font-size: 0.7em;
-        letter-spacing: 2px; padding: 0 12px;
-        position: relative; top: -0.65em;
+        flex-direction: column;
+        gap: 6px;
     }
 
-    /* Shared recurring expand styles */
-    .rq-sector { font-size: 0.75em; color: #ff00ff; margin-bottom: 4px; }
-    .rq-subject { font-size: 0.75em; color: #ff00ff; margin-bottom: 8px; }
-    .rq-task {
-        font-size: 0.8em; color: #ccc;
+    /* Book group headers */
+    .sched-book-group { margin-bottom: 10px; }
+    .sched-book-header {
+        font-size: 0.8em;
+        font-weight: bold;
+        color: #ff00ff;
+        letter-spacing: 1px;
+        padding: 4px 12px;
+        margin-bottom: 4px;
+    }
+    /* Cards */
+    .sched-card {
+        padding: 8px 12px;
         border-left: 2px solid #ff00ff;
-        padding-left: 10px;
-        margin-top: 8px; margin-bottom: 12px;
+        background: rgba(255, 0, 255, 0.03);
+    }
+    .sched-card-overdue {
+        border-left-color: #ff0044;
+        background: rgba(255, 0, 68, 0.04);
+    }
+    .sched-card-overdue .sched-chapter { color: #ff0044; }
+    .sched-card-overdue .sched-details-text { color: #ff6666; }
+    .sched-done {
+        border-left-color: #00ff9d;
+        background: rgba(0, 255, 157, 0.03);
+        opacity: 0.55;
+    }
+    .sched-card-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .sched-icon { font-size: 0.8em; }
+    .sched-chapter {
+        font-size: 0.8em;
+        color: #aaa;
         text-transform: none;
-        word-wrap: break-word;
-        overflow-wrap: break-word;
     }
-    .rq-task-label { color: #ff00ff; font-weight: bold; letter-spacing: 1px; }
-    .rq-log-section {
-        border-top: 1px solid rgba(0, 242, 255, 0.15);
-        margin-top: 12px; padding-top: 10px;
+    .sched-date {
+        color: #888;
+        margin-left: 6px;
     }
-    .rq-log-title { font-size: 0.7em; color: #ffea00; letter-spacing: 2px; margin-bottom: 8px; }
-    .rq-log-entry {
-        font-size: 0.75em; color: #aaa;
-        padding: 4px 0 4px 10px;
-        border-left: 2px solid rgba(255, 234, 0, 0.2);
-        margin-bottom: 4px; text-transform: none;
+    .sched-time {
+        color: #ff8800;
+        margin-left: 4px;
     }
-    .rq-log-date { color: #ff8800; margin-right: 8px; }
-    .rq-log-time { color: #ff8800; margin-left: 8px; font-weight: bold; }
-    .rq-log-time-edit { color: #555; cursor: pointer; margin-left: 4px; font-size: 0.9em; }
-    .rq-log-time-edit:hover { color: #ffea00; }
-    .rq-log-time-form { display: inline; margin-left: 4px; }
-    .rq-log-time-input { width: 45px; padding: 2px 4px; background: #1a1d26; border: 1px solid #ff8800; color: #ff8800; font-family: 'Courier New', monospace; font-size: 0.9em; text-align: center; }
-    .rq-log-time-save { background: none; border: 1px solid #00ff9d; color: #00ff9d; cursor: pointer; padding: 1px 6px; font-size: 0.9em; margin-left: 2px; }
-    .rq-log-time-save:hover { background: #00ff9d; color: #0a0b10; }
-    .rq-log-author { color: #555; margin-left: 6px; }
-    .rq-log-empty { font-size: 0.7em; color: #555; font-style: italic; text-transform: none; }
-    .rq-log-form {
-        display: flex; flex-direction: column; gap: 8px; margin-top: 10px;
+    .sched-details {
+        margin-top: 4px;
+        padding-left: 22px;
+        font-size: 0.7em;
+        text-transform: none;
     }
-    .rq-log-row {
-        display: flex; gap: 8px; align-items: flex-end; flex-wrap: wrap;
+    .sched-details-text { color: #ccc; }
+    .sched-details-input {
+        width: 70%;
+        padding: 2px 6px;
+        background: #1a1d26;
+        border: 1px solid #ffea00;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        font-size: 1em;
+        text-transform: none;
     }
-    .rq-log-form input[type="date"] {
-        background: #1a1d26; border: 1px solid #ff8800; color: #ff8800;
-        padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em;
+    .sched-details-input:focus { outline: none; box-shadow: 0 0 5px rgba(255,234,0,0.3); }
+    .sched-details-edit { color: #555; cursor: pointer; margin-left: 6px; font-size: 0.9em; }
+    .sched-details-edit:hover { color: #ffea00; }
+    .sched-details-save {
+        background: none; border: 1px solid #00ff9d; color: #00ff9d; cursor: pointer;
+        padding: 1px 6px; font-size: 0.85em; margin-left: 4px; display: none;
     }
-    .rq-log-form input[type="date"]:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
-    .rq-log-form textarea {
-        flex: 1; min-width: 0; background: #1a1d26; border: 1px solid #333;
-        color: #00f2ff; padding: 6px 10px; font-family: 'Courier New', monospace;
-        font-size: 0.75em; text-transform: none; resize: vertical;
-        min-height: 36px; max-height: 120px; box-sizing: border-box;
+    .sched-details-save:hover { background: #00ff9d; color: #0a0b10; }
+    .no-schedule {
+        text-align: center;
+        color: #555;
+        padding: 40px;
+        font-size: 0.9em;
     }
-    .rq-log-form textarea:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
-    .rq-log-btn {
-        background: none; border: 1px solid #00f2ff; color: #00f2ff;
-        padding: 6px 15px; font-family: 'Courier New', monospace; font-size: 0.75em;
-        cursor: pointer; text-transform: uppercase; transition: all 0.2s; white-space: nowrap;
-    }
-    .rq-log-btn:hover:not(:disabled) { background: #00f2ff; color: #0a0b10; }
-    .rq-log-btn:disabled { border-color: #444; color: #555; cursor: not-allowed; opacity: 0.5; }
-    .rq-log-hint { font-size: 0.6em; color: #555; letter-spacing: 1px; text-align: right; }
-    .rq-time-input {
-        width: 70px; background: #1a1d26; border: 1px solid #ff8800; color: #ff8800;
-        padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em; text-align: center;
-    }
-    .rq-time-input:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
-    .time-group { display: flex; flex-direction: column; align-items: center; gap: 2px; flex-shrink: 0; }
-    .time-label { font-size: 0.6em; color: #ff8800; letter-spacing: 1px; white-space: nowrap; }
-    .time-row { display: flex; align-items: center; gap: 4px; }
-    .time-unit { font-size: 0.65em; color: #ff8800; letter-spacing: 1px; }
-    .time-input {
-        width: 70px; background: #1a1d26; border: 1px solid #ff8800; color: #ff8800;
-        padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em; text-align: center;
-    }
-    .time-input:focus { outline: none; border-color: #ffea00; box-shadow: 0 0 5px rgba(255, 234, 0, 0.3); }
-    .rq-complete-form { margin-top: 12px; text-align: right; }
-    .rq-complete-btn {
-        background: none; border: 1px solid #00ff9d; color: #00ff9d;
-        padding: 8px 20px; font-family: 'Courier New', monospace; font-size: 0.8em;
-        cursor: pointer; text-transform: uppercase; transition: all 0.2s; letter-spacing: 2px;
-    }
-    .rq-complete-btn:hover { background: #00ff9d; color: #0a0b10; box-shadow: 0 0 10px rgba(0, 255, 157, 0.4); }
-    .rq-abandon-btn {
-        background: none; border: 1px solid #ff0044; color: #ff0044;
-        padding: 8px 20px; font-family: 'Courier New', monospace; font-size: 0.8em;
-        cursor: pointer; text-transform: uppercase; transition: all 0.2s; letter-spacing: 2px;
-    }
-    .rq-abandon-btn:hover { background: #ff0044; color: #0a0b10; box-shadow: 0 0 8px rgba(255, 0, 68, 0.5); }
-    .no-quests { text-align: center; color: #555; padding: 40px; font-size: 0.9em; }
+
     @media (max-width: 600px) {
         body { padding: 10px; }
-        .hud-container { padding: 15px; }
-        .rc-grid { grid-template-columns: 1fr; }
-        .rq-log-form { flex-direction: column; }
+        .hud-container { padding: 12px; }
+        .sched-details-input { width: 90%; }
     }
     </style>
 </head>
@@ -5505,270 +5866,53 @@ function buildRecurringPage(cardHtml, expandHtml, totalCount, loggedCount, isTea
             <a class="back-link" href="/">&lt; BACK TO HUD</a>
             <a class="back-link" href="/quests">QUEST BOARD &gt;</a>
         </div>
-        <h1>Recurring Quests</h1>
-        <div class="quest-stats"><span>${loggedCount}</span> LOGGED TODAY / <span>${totalCount}</span> TOTAL</div>
-        <div class="rc-grid">
-        ${cardHtml || '<div class="no-quests" style="grid-column:1/-1">NO RECURRING QUESTS. MARK A MINION AS RECURRING TO GET STARTED.</div>'}
-        </div>
-        <div class="rc-detail-area">
-        ${expandHtml}
-        </div>
+        <h1>Reading Schedule</h1>
+        ${booksHtml}
+        ${emptyMsg}
     </div>
-    <script>
-    function toggleRecurring(rid) {
-        var panel = document.getElementById('re-' + rid);
-        var card = document.querySelector('.rc-card[data-rid="' + rid + '"]');
-        var isOpen = panel.classList.contains('open');
-        document.querySelectorAll('.rc-expand.open').forEach(function(p) { p.classList.remove('open'); });
-        document.querySelectorAll('.rc-card.active').forEach(function(c) { c.classList.remove('active'); });
-        if (!isOpen) {
-            panel.classList.add('open');
-            card.classList.add('active');
-            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 100);
-        }
+    ${isTeacher ? `<script>
+    function toggleDetails(id) {
+        var display = document.getElementById('sdt-' + id);
+        var input = document.getElementById('sdi-' + id);
+        var save = document.getElementById('sds-' + id);
+        var pencil = document.getElementById('sde-' + id);
+        if (!display || !input) return;
+        var editing = input.style.display !== 'none';
+        display.style.display = editing ? '' : 'none';
+        input.style.display = editing ? 'none' : '';
+        save.style.display = editing ? 'none' : 'inline';
+        pencil.style.display = editing ? '' : 'none';
+        if (!editing) input.focus();
     }
-    function confirmComplete(form) {
-        return confirm('Are you completely finished with this book? This will submit it for final teacher review and you will no longer log daily updates.');
-    }
-    function confirmAbandon(form) {
-        return confirm('Abandon this recurring quest?');
-    }
-    function toggleLogTimeEdit(pencil) {
-        var entry = pencil.parentElement;
-        var formSpan = entry.querySelector('.rq-log-time-form');
-        if (!formSpan) return;
-        var showing = formSpan.style.display !== 'none';
-        formSpan.style.display = showing ? 'none' : 'inline';
-        if (!showing) formSpan.querySelector('.rq-log-time-input').focus();
-    }
-    function saveLogTime(btn, questId, date) {
-        var input = btn.previousElementSibling;
-        var newTime = input.value;
-        fetch('/admin/recurring/update-log-time', {
+    function saveDetails(id, questId, chapter) {
+        var input = document.getElementById('sdi-' + id);
+        if (!input) return;
+        fetch('/admin/recurring/update-chapter', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ questId: questId, date: date, timeSpent: newTime })
-        }).then(function(r) { return r.json(); }).then(function(data) {
-            if (data.success) { location.reload(); }
-            else { alert('Error: ' + (data.error || 'Unknown')); }
+            body: JSON.stringify({ questId: questId, chapter: chapter, field: 'details', value: input.value })
+        }).then(function(r) { return r.json(); }).then(function(res) {
+            if (res.success) {
+                var display = document.getElementById('sdt-' + id);
+                display.textContent = input.value || 'No details';
+                if (!input.value) display.innerHTML = '<span style="color:#555;font-style:italic;">No details</span>';
+                toggleDetails(id);
+            } else {
+                alert('Error: ' + (res.error || 'Unknown'));
+            }
         }).catch(function(e) { alert('Error saving: ' + e.message); });
     }
-    (function() {
-        document.querySelectorAll('.rq-log-form').forEach(function(form) {
-            var note = form.querySelector('.rq-note');
-            var time = form.querySelector('.rq-time');
-            var btn = form.querySelector('.rq-log-btn');
-            var hint = form.querySelector('.rq-log-hint');
-            if (!note || !time || !btn) return;
-            function check() {
-                var hasNote = note.value.trim().length > 0;
-                var hasTime = parseInt(time.value) > 0;
-                btn.disabled = !(hasNote && hasTime);
-                if (hint) hint.style.display = (hasNote && hasTime) ? 'none' : '';
-            }
-            note.addEventListener('input', check);
-            time.addEventListener('input', check);
-        });
-    })();
-    </script>
+    </script>` : ""}
 </body>
-</html>`;
-}
-
-app.get("/recurring", async (req, res) => {
-  try {
-    const sheets = await getSheets();
-    const [quests, questLogs] = await Promise.all([
-      fetchQuestsData(sheets),
-      fetchQuestLogData(sheets),
-    ]);
-
-    // All recurring quests that aren't done or abandoned (includes Submitted for display)
-    const recurring = quests.filter((q) => (q["Recurring"] || "").toUpperCase() === "X" && q["Status"] !== "Abandoned" && q["Status"] !== "Approved");
-    const activeRecurring = recurring.filter((q) => q["Status"] === "Active" || q["Status"] === "Rejected");
-    const today = new Date().toISOString().slice(0, 10);
-    const loggedCount = getLoggedTodayCount(questLogs, activeRecurring);
-    const isTeacher = req.cookies && req.cookies.role === "teacher";
-
-    // Group logs by Quest ID
-    const logsByQuest = {};
-    for (const log of questLogs) {
-      const qid = log["Quest ID"];
-      if (!logsByQuest[qid]) logsByQuest[qid] = [];
-      logsByQuest[qid].push(log);
-    }
-    // Sort logs descending by date within each group
-    for (const qid of Object.keys(logsByQuest)) {
-      logsByQuest[qid].sort((a, b) => (b["Date"] || "").localeCompare(a["Date"] || ""));
-    }
-
-    // Build set of quest IDs logged today
-    const loggedTodayIds = new Set();
-    for (const log of questLogs) {
-      if ((log["Date"] || "").slice(0, 10) === today) loggedTodayIds.add(log["Quest ID"]);
-    }
-
-    // Split into not-logged-today (top) and logged-today (bottom)
-    const notLoggedToday = recurring.filter(q => !loggedTodayIds.has(q["Quest ID"]));
-    const loggedToday = recurring.filter(q => loggedTodayIds.has(q["Quest ID"]));
-
-    function buildCard(q) {
-      const qid = q["Quest ID"];
-      const safeQid = (qid || "").replace(/[^A-Z0-9]/gi, "");
-      const logs = logsByQuest[qid] || [];
-      const recent = logs.slice(0, 3);
-      const hasLogToday = loggedTodayIds.has(qid);
-
-      const statusColors = { Active: "#ff6600", Submitted: "#ffea00", Rejected: "#ff0044" };
-      const sc = statusColors[q["Status"]] || "#555";
-      const subjectDisplay = q["Subject"] ? `<div class="rq-subject">SUBJECT: ${escHtml(q["Subject"])}</div>` : "";
-
-      const loggedBadge = hasLogToday ? `<span class="rc-logged-badge">\u2705</span>` : "";
-      const rejectBadge = q["Status"] === "Rejected" ? `<span class="rc-reject-badge">!</span>` : "";
-
-      let logEntries = "";
-      if (recent.length > 0) {
-        for (const log of recent) {
-          const logTime = log["Time Spent"] || "";
-          const timeDisplay = logTime ? `<span class="rq-log-time">${escHtml(logTime)}m</span>` : "";
-          const timeEdit = isTeacher ? `<span class="rq-log-time-edit" onclick="toggleLogTimeEdit(this)" title="Edit time spent">&#x270E;</span><span class="rq-log-time-form" style="display:none;"><input type="number" class="rq-log-time-input" value="${escHtml(logTime)}" min="0" max="600" placeholder="0"><button class="rq-log-time-save" onclick="saveLogTime(this,'${escHtml(qid)}','${escHtml(log["Date"] || "")}')">&#x2713;</button></span>` : "";
-          logEntries += `<div class="rq-log-entry"><span class="rq-log-date">${escHtml(log["Date"] || "")}</span>${escHtml(log["Note"] || "")}${timeDisplay}${timeEdit}<span class="rq-log-author">${escHtml(log["Author"] || "")}</span></div>`;
-        }
-        if (logs.length > 3) {
-          logEntries += `<div class="rq-log-entry" style="color:#555;font-style:italic;">+ ${logs.length - 3} more entries</div>`;
-        }
-      } else {
-        logEntries = `<div class="rq-log-empty">No progress logged yet.</div>`;
-      }
-
-      const logForm = `<form class="rq-log-form" method="POST" action="/recurring/log">
-            <input type="hidden" name="questId" value="${qid}">
-            <div class="rq-log-row">
-              <input type="date" name="date" value="${today}">
-              <textarea name="note" class="rq-note" placeholder="What did you do today?" required></textarea>
-            </div>
-            <div class="rq-log-row">
-              <div class="time-group">
-                <label class="time-label">TIME SPENT</label>
-                <div class="time-row"><input type="number" name="timeSpent" class="time-input rq-time" placeholder="0" min="1" max="600" required><span class="time-unit">MIN</span></div>
-              </div>
-              <button type="submit" class="rq-log-btn" disabled>LOG UPDATE</button>
-            </div>
-            <div class="rq-log-hint">Fill in what you did and time spent to log</div>
-          </form>`;
-
-      const isActive = q["Status"] === "Active" || q["Status"] === "Rejected";
-      let actionControls = "";
-      if (isActive || isTeacher) {
-        actionControls = `<div class="rq-complete-form" style="display:flex;gap:10px;justify-content:flex-end;">`;
-        if (isTeacher) {
-          actionControls += `<form method="POST" action="/quest/remove" onsubmit="return confirmAbandon(this)" style="margin:0;">
-                <input type="hidden" name="questId" value="${qid}">
-                <button type="submit" class="rq-abandon-btn">ABANDON</button>
-              </form>`;
-        }
-        if (isActive) {
-          actionControls += `<form method="POST" action="/recurring/complete" onsubmit="return confirmComplete(this)" style="margin:0;">
-                <input type="hidden" name="questId" value="${qid}">
-                <button type="submit" class="rq-complete-btn">BOOK FINISHED — SUBMIT FOR FINAL REVIEW</button>
-              </form>`;
-        }
-        actionControls += `</div>`;
-      }
-
-      const rejectedNote = q["Status"] === "Rejected" && q["Feedback"]
-        ? `<div class="rc-reject-reason">REJECTED: ${escHtml(q["Feedback"])}</div>`
-        : "";
-
-      // Compact summary card
-      const card = `
-        <div class="rc-card${hasLogToday ? " rc-card-logged" : ""}" data-rid="${safeQid}" onclick="toggleRecurring('${safeQid}')">
-          <div class="rc-summary">
-            <div class="rc-left">
-              <span class="rc-minion">${escHtml(q["Minion"])}</span>
-              <span class="rc-boss">${escHtml(q["Boss"])}</span>
-            </div>
-            <div class="rc-right">
-              ${rejectBadge}${loggedBadge}
-              <span class="rc-status" style="color:${sc}">${q["Status"]}</span>
-              <span class="rc-log-count">${logs.length} logs</span>
-            </div>
-          </div>
-        </div>`;
-
-      // Expand panel (rendered below all cards)
-      const expand = `
-        <div class="rc-expand" id="re-${safeQid}">
-          <div class="rc-expand-inner">
-            <div class="rc-expand-header">
-              <span class="rc-expand-name">${escHtml(q["Boss"])} &gt; ${escHtml(q["Minion"])}</span>
-              <span class="rc-id">${qid}</span>
-            </div>
-            <div class="rq-sector">SECTOR: ${escHtml(q["Sector"])}</div>
-            ${subjectDisplay}
-            ${rejectedNote}
-            <div class="rq-task">
-              <span class="rq-task-label">TASK:</span> ${q["Suggested By AI"] || "No task details."}
-            </div>
-            <div class="rq-log-section">
-              <div class="rq-log-title">PROGRESS LOG (${logs.length} entries)</div>
-              ${logEntries}
-              ${logForm}
-            </div>
-            ${actionControls}
-          </div>
-        </div>`;
-
-      return { card, expand };
-    }
-
-    let cardHtml = "";
-    let expandHtml = "";
-    for (const q of notLoggedToday) {
-      const result = buildCard(q);
-      cardHtml += result.card;
-      expandHtml += result.expand;
-    }
-    if (notLoggedToday.length > 0 && loggedToday.length > 0) {
-      cardHtml += `<div class="rc-separator"><span>\u2713 LOGGED TODAY (${loggedToday.length})</span></div>`;
-    }
-    for (const q of loggedToday) {
-      const result = buildCard(q);
-      cardHtml += result.card;
-      expandHtml += result.expand;
-    }
-
-    res.send(buildRecurringPage(cardHtml, expandHtml, recurring.length, loggedCount, isTeacher));
+</html>`);
   } catch (err) {
-    console.error("Recurring quest page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    console.error("Schedule page error:", err);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
 app.post("/recurring/log", async (req, res) => {
-  try {
-    const { questId, date, note, timeSpent } = req.body;
-    if (!questId || !note) {
-      return res.status(400).send("Quest ID and note are required.");
-    }
-    const author = req.cookies.userName || "Unknown";
-    const logDate = date || new Date().toISOString().slice(0, 10);
-
-    const sheets = await getSheets();
-    await ensureQuestLogSheet(sheets);
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: "Quest_Log!A:E",
-      valueInputOption: "RAW",
-      insertDataOption: "INSERT_ROWS",
-      requestBody: { values: [[questId, logDate, note, author, timeSpent || ""]] },
-    });
-
-    res.redirect("/recurring");
-  } catch (err) {
-    console.error("Recurring log error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
-  }
+  res.status(410).send("This endpoint has been replaced by the chapter schedule system. Visit /recurring for the reading schedule.");
 });
 
 // Teacher: update time spent on a recurring log entry
@@ -5800,7 +5944,7 @@ app.post("/admin/recurring/update-log-time", async (req, res) => {
       return res.status(500).json({ error: "Time Spent column not found" });
     }
 
-    const colRef = String.fromCharCode(65 + timeCol);
+    const timeColRef = colLetter(timeCol);
     let targetRow = -1;
     for (let i = 1; i < rows.length; i++) {
       if (rows[i][idCol] === questId && (rows[i][dateCol] || "").slice(0, 10) === date.slice(0, 10)) {
@@ -5814,7 +5958,7 @@ app.post("/admin/recurring/update-log-time", async (req, res) => {
 
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Quest_Log!${colRef}${targetRow}`,
+      range: `Quest_Log!${timeColRef}${targetRow}`,
       valueInputOption: "RAW",
       requestBody: { values: [[timeSpent || ""]] },
     });
@@ -5852,7 +5996,6 @@ app.post("/recurring/complete", async (req, res) => {
     if (targetRow < 0) return res.status(404).send("Quest not found.");
 
     const today = new Date().toISOString().slice(0, 10);
-    const colLetter = (idx) => idx < 26 ? String.fromCharCode(65 + idx) : String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
     const updates = [
       { range: `Quests!${colLetter(statusCol)}${targetRow}`, values: [["Submitted"]] },
     ];
@@ -5873,7 +6016,893 @@ app.post("/recurring/complete", async (req, res) => {
     res.redirect("/recurring");
   } catch (err) {
     console.error("Recurring complete error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Chapter Schedule Management
+// ---------------------------------------------------------------------------
+app.get("/admin/recurring", async (req, res) => {
+  try {
+    const sheets = await getSheets();
+    const [quests, schedule, sectorsRes2] = await Promise.all([
+      fetchQuestsData(sheets),
+      fetchScheduleData(sheets),
+      sheets.spreadsheets.values.get({ spreadsheetId: SPREADSHEET_ID, range: "Sectors" }),
+    ]);
+    enrichQuestsFromSectors(quests, parseTable(sectorsRes2.data.values), sheets);
+
+    const recurringQuests = quests.filter(q =>
+      (q["Recurring"] || "").toUpperCase() === "X" &&
+      q["Status"] !== "Abandoned" && q["Status"] !== "Approved"
+    );
+
+    // Group schedule rows by Quest ID
+    const schedByQuest = {};
+    for (const s of schedule) {
+      const qid = s["Quest ID"];
+      if (!schedByQuest[qid]) schedByQuest[qid] = [];
+      schedByQuest[qid].push(s);
+    }
+    // Sort chapters numerically
+    for (const qid of Object.keys(schedByQuest)) {
+      schedByQuest[qid].sort((a, b) => (parseInt(a["Chapter"]) || 0) - (parseInt(b["Chapter"]) || 0));
+    }
+
+    let booksHtml = "";
+    for (const q of recurringQuests) {
+      const qid = q["Quest ID"];
+      const safeQid = (qid || "").replace(/[^A-Z0-9]/gi, "");
+      const chapters = schedByQuest[qid] || [];
+      const doneCount = chapters.filter(c => (c["Completed"] || "").toUpperCase() === "X").length;
+      const totalCount = chapters.length;
+      const pct = totalCount > 0 ? Math.round(doneCount / totalCount * 100) : 0;
+
+      let chapterRows = "";
+      for (const ch of chapters) {
+        const isDone = (ch["Completed"] || "").toUpperCase() === "X";
+        chapterRows += `
+          <tr class="ch-row${isDone ? " ch-done" : ""}" data-qid="${escHtml(qid)}" data-ch="${escHtml(ch["Chapter"])}">
+            <td class="ch-cell ch-check"><input type="checkbox" ${isDone ? "checked" : ""} onchange="updateField(this,'${escHtml(qid)}','${escHtml(ch["Chapter"])}','completed',this.checked?'X':'')"></td>
+            <td class="ch-cell ch-num">${escHtml(ch["Chapter"])}</td>
+            <td class="ch-cell ch-time"><input type="number" value="${escHtml(ch["Time"] || "")}" onchange="updateField(this,'${escHtml(qid)}','${escHtml(ch["Chapter"])}','time',this.value)" min="0" max="600" placeholder="0"></td>
+            <td class="ch-cell ch-date"><input type="date" value="${escHtml(ch["Scheduled Date"] || "")}" onchange="updateField(this,'${escHtml(qid)}','${escHtml(ch["Chapter"])}','date',this.value)"></td>
+            <td class="ch-cell ch-details"><input type="text" value="${escHtml(ch["Details"] || "")}" onchange="updateField(this,'${escHtml(qid)}','${escHtml(ch["Chapter"])}','details',this.value)" placeholder="Instructions..."></td>
+            <td class="ch-cell ch-del"><button class="ch-del-btn" onclick="deleteChapter('${escHtml(qid)}','${escHtml(ch["Chapter"])}','${safeQid}')" title="Delete chapter">&times;</button></td>
+          </tr>`;
+      }
+
+      booksHtml += `
+        <div class="book-section" id="book-${safeQid}">
+          <div class="book-header" onclick="toggleBook('${safeQid}')">
+            <div class="book-title-row">
+              <span class="book-name">${escHtml(bookTitle(q["Minion"]))}</span>
+              <span class="book-boss">${escHtml(q["Boss"])}</span>
+            </div>
+            <div class="book-progress-row">
+              <div class="book-progress-bar"><div class="book-progress-fill" style="width:${pct}%"></div></div>
+              <span class="book-progress-text">${doneCount}/${totalCount}</span>
+              <span class="book-expand-icon" id="icon-${safeQid}">&#x25BC;</span>
+            </div>
+          </div>
+          <div class="book-body" id="body-${safeQid}" style="display:none;">
+            <div class="book-controls">
+              <div class="bulk-add">
+                <label>ADD CHAPTERS</label>
+                <input type="number" id="bulkStart-${safeQid}" value="${totalCount > 0 ? totalCount + 1 : 1}" min="1" max="200" style="width:55px;">
+                <label>TO</label>
+                <input type="number" id="bulkN-${safeQid}" value="${totalCount > 0 ? totalCount + 5 : 10}" min="1" max="200">
+                <button onclick="addChapters('${escHtml(qid)}','${safeQid}')">ADD</button>
+              </div>
+              <div class="remove-book">
+                <button class="remove-book-btn" onclick="removeBook('${escHtml(qid)}','${safeQid}')">REMOVE BOOK</button>
+              </div>
+            </div>
+            <table class="ch-table">
+              <thead><tr>
+                <th class="ch-th">DONE</th>
+                <th class="ch-th">CH#</th>
+                <th class="ch-th">MIN</th>
+                <th class="ch-th">DATE</th>
+                <th class="ch-th">DETAILS</th>
+                <th class="ch-th ch-del-th">DEL</th>
+              </tr></thead>
+              <tbody id="tbody-${safeQid}">
+                ${chapterRows || '<tr><td colspan="6" class="ch-empty">NO CHAPTERS YET. USE BULK ADD ABOVE.</td></tr>'}
+              </tbody>
+            </table>
+          </div>
+        </div>`;
+    }
+
+    if (recurringQuests.length === 0) {
+      booksHtml = '<div class="no-books">NO RECURRING QUESTS FOUND. ADD BOOKS TO THE QUEST BOARD FIRST.</div>';
+    }
+
+    res.send(`<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <title>Chapter Schedule - Admin</title>
+    <style>
+    body {
+        background: #0a0b10;
+        color: #00f2ff;
+        font-family: 'Courier New', monospace;
+        padding: 20px;
+        text-transform: uppercase;
+        overflow-x: hidden;
+    }
+    .hud-container {
+        border: 2px solid #ffea00;
+        padding: 20px;
+        box-shadow: 0 0 15px rgba(255, 234, 0, 0.3);
+        max-width: 960px;
+        margin: auto;
+        box-sizing: border-box;
+    }
+    h1 {
+        text-shadow: 2px 2px #ff00ff;
+        letter-spacing: 2px;
+        text-align: center;
+        margin-bottom: 15px;
+        color: #ffea00;
+    }
+    .back-link {
+        display: inline-block;
+        color: #00f2ff;
+        text-decoration: none;
+        border: 1px solid #00f2ff;
+        padding: 6px 15px;
+        margin-bottom: 15px;
+        font-size: 0.8em;
+        transition: all 0.2s;
+    }
+    .back-link:hover { background: #00f2ff; color: #0a0b10; }
+    .book-section {
+        border: 1px solid rgba(0, 242, 255, 0.2);
+        margin-bottom: 10px;
+    }
+    .book-header {
+        padding: 12px 14px;
+        cursor: pointer;
+        background: rgba(0, 242, 255, 0.03);
+        transition: background 0.2s;
+    }
+    .book-header:hover { background: rgba(0, 242, 255, 0.08); }
+    .book-title-row {
+        display: flex;
+        justify-content: space-between;
+        align-items: baseline;
+        margin-bottom: 6px;
+    }
+    .book-name { font-weight: bold; letter-spacing: 1px; font-size: 0.9em; }
+    .book-boss { font-size: 0.7em; color: #ff00ff; }
+    .book-progress-row {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .book-progress-bar {
+        flex: 1;
+        height: 6px;
+        background: #1a1d26;
+        border: 1px solid #333;
+        overflow: hidden;
+    }
+    .book-progress-fill {
+        height: 100%;
+        background: linear-gradient(90deg, #00ff9d, #00f2ff);
+        transition: width 0.3s;
+    }
+    .book-progress-text { font-size: 0.7em; color: #00ff9d; white-space: nowrap; }
+    .book-expand-icon { font-size: 0.7em; color: #555; transition: transform 0.2s; }
+    .book-body { padding: 0 14px 14px; overflow-x: auto; }
+    .book-controls {
+        display: flex;
+        gap: 15px;
+        flex-wrap: wrap;
+        margin-bottom: 12px;
+        padding: 10px;
+        background: rgba(255, 234, 0, 0.03);
+        border: 1px solid rgba(255, 234, 0, 0.15);
+    }
+    .book-controls label {
+        font-size: 0.65em;
+        color: #ffea00;
+        letter-spacing: 1px;
+        margin-right: 6px;
+    }
+    .book-controls input[type="number"],
+    .book-controls input[type="date"] {
+        background: #1a1d26;
+        border: 1px solid #555;
+        color: #00f2ff;
+        padding: 4px 8px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+        width: 70px;
+    }
+    .book-controls input[type="date"] { width: 130px; }
+    .book-controls select {
+        background: #1a1d26;
+        border: 1px solid #555;
+        color: #00f2ff;
+        padding: 4px 8px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+    }
+    .book-controls button {
+        background: none;
+        border: 1px solid #ffea00;
+        color: #ffea00;
+        padding: 4px 12px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+        cursor: pointer;
+        transition: all 0.2s;
+    }
+    .book-controls button:hover { background: #ffea00; color: #0a0b10; }
+    .bulk-add { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .ch-table {
+        width: 100%;
+        border-collapse: collapse;
+        font-size: 0.8em;
+    }
+    .ch-th {
+        text-align: center;
+        padding: 6px 8px;
+        border-bottom: 1px solid #555;
+        color: #888;
+        font-size: 0.75em;
+        letter-spacing: 1px;
+    }
+    .ch-cell {
+        padding: 4px 8px;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        text-align: center;
+    }
+    .ch-details { text-align: left; }
+    .ch-details input {
+        width: 100%;
+        background: transparent;
+        border: 1px solid transparent;
+        color: #ccc;
+        padding: 3px 6px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.9em;
+        text-transform: none;
+        box-sizing: border-box;
+    }
+    .ch-details input:hover { border-color: #333; }
+    .ch-details input:focus { border-color: #ffea00; outline: none; background: #1a1d26; }
+    .ch-check { width: 40px; text-align: center; }
+    .ch-num { width: 50px; color: #888; }
+    .ch-time { width: 70px; }
+    .ch-time input {
+        width: 50px;
+        background: transparent;
+        border: 1px solid transparent;
+        color: #ff8800;
+        padding: 3px 6px;
+        font-family: 'Courier New', monospace;
+        font-size: 1em;
+        text-align: center;
+    }
+    .ch-time input:hover { border-color: #333; }
+    .ch-time input:focus { border-color: #ff8800; outline: none; background: #1a1d26; }
+    .ch-date { width: 140px; }
+    .ch-date input {
+        background: transparent;
+        border: 1px solid transparent;
+        color: #00f2ff;
+        padding: 3px 6px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.9em;
+    }
+    .ch-date input:hover { border-color: #333; }
+    .ch-date input:focus { border-color: #00f2ff; outline: none; background: #1a1d26; }
+    .ch-done { opacity: 0.45; }
+    .ch-del-th, .ch-del { width: 36px; text-align: center; }
+    .ch-del-btn {
+        background: none; border: 1px solid #ff0044; color: #ff0044;
+        font-size: 1em; cursor: pointer; padding: 1px 6px;
+        font-family: 'Courier New', monospace; transition: all 0.2s; line-height: 1;
+    }
+    .ch-del-btn:hover { background: #ff0044; color: #0a0b10; }
+    .remove-book { margin-left: auto; }
+    .remove-book-btn {
+        background: none; border: 1px solid #ff0044; color: #ff0044;
+        padding: 4px 12px; font-family: 'Courier New', monospace;
+        font-size: 0.75em; cursor: pointer; transition: all 0.2s; letter-spacing: 1px;
+    }
+    .remove-book-btn:hover { background: #ff0044; color: #0a0b10; }
+    .ch-empty { text-align: center; color: #555; padding: 20px; font-size: 0.85em; }
+    .no-books { text-align: center; color: #555; padding: 40px; font-size: 0.9em; }
+    .save-indicator {
+        position: fixed;
+        bottom: 20px;
+        right: 20px;
+        padding: 8px 16px;
+        font-family: 'Courier New', monospace;
+        font-size: 0.75em;
+        letter-spacing: 1px;
+        border: 1px solid;
+        opacity: 0;
+        transition: opacity 0.3s;
+        pointer-events: none;
+    }
+    .save-ok { background: rgba(0,255,157,0.1); border-color: #00ff9d; color: #00ff9d; }
+    .save-err { background: rgba(255,0,68,0.1); border-color: #ff0044; color: #ff0044; }
+    @media (max-width: 600px) {
+        body { padding: 10px; }
+        .hud-container { padding: 12px; }
+        .book-controls { flex-direction: column; }
+        .ch-table { font-size: 0.7em; }
+    }
+    </style>
+</head>
+<body>
+    <div class="hud-container">
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin/curriculum">&lt; CURRICULUM</a><a class="back-link" href="/admin">&lt; ADMIN</a></div>
+        <h1>Chapter Schedule</h1>
+        ${booksHtml}
+    </div>
+    <div class="save-indicator" id="saveIndicator"></div>
+    <script>
+    function toggleBook(id) {
+        var body = document.getElementById('body-' + id);
+        var icon = document.getElementById('icon-' + id);
+        var showing = body.style.display !== 'none';
+        document.querySelectorAll('.book-body').forEach(function(b) { b.style.display = 'none'; });
+        document.querySelectorAll('.book-expand-icon').forEach(function(i) { i.style.transform = ''; });
+        if (!showing) {
+            body.style.display = '';
+            icon.style.transform = 'rotate(180deg)';
+        }
+    }
+
+    function showSave(ok, msg) {
+        var el = document.getElementById('saveIndicator');
+        el.className = 'save-indicator ' + (ok ? 'save-ok' : 'save-err');
+        el.textContent = msg || (ok ? 'SAVED' : 'ERROR');
+        el.style.opacity = '1';
+        setTimeout(function() { el.style.opacity = '0'; }, 1500);
+    }
+
+    function updateField(input, questId, chapter, field, value) {
+        fetch('/admin/recurring/update-chapter', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ questId: questId, chapter: chapter, field: field, value: value })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.success) {
+                showSave(true);
+                if (field === 'completed') {
+                    var row = input.closest('.ch-row');
+                    if (row) row.classList.toggle('ch-done', value === 'X');
+                }
+                if (data.allDone) {
+                    if (confirm('All chapters are complete! Mark this book as ENSLAVED?')) {
+                        fetch('/admin/recurring/enslave', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ questId: questId })
+                        }).then(function(r2) { return r2.json(); }).then(function(d2) {
+                            if (d2.success) {
+                                showSave(true, 'ENSLAVED');
+                                location.reload();
+                            } else {
+                                showSave(false, d2.error || 'ERROR');
+                            }
+                        }).catch(function(e2) { showSave(false, e2.message); });
+                    }
+                }
+            } else {
+                showSave(false, data.error || 'ERROR');
+            }
+        }).catch(function(e) { showSave(false, e.message); });
+    }
+
+    function addChapters(questId, safeId) {
+        var startNum = parseInt(document.getElementById('bulkStart-' + safeId).value) || 1;
+        var n = parseInt(document.getElementById('bulkN-' + safeId).value) || 10;
+        fetch('/admin/recurring/add-chapters', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ questId: questId, count: n, startNum: startNum })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.success) { location.reload(); }
+            else { alert('Error: ' + (data.error || 'Unknown')); }
+        }).catch(function(e) { alert('Error: ' + e.message); });
+    }
+
+    function deleteChapter(questId, chapter, safeId) {
+        if (!confirm('Delete chapter ' + chapter + '? This cannot be undone.')) return;
+        fetch('/admin/recurring/delete-chapter', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ questId: questId, chapter: chapter })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.success) {
+                showSave(true, 'DELETED');
+                var tbody = document.getElementById('tbody-' + safeId);
+                var rows = tbody.querySelectorAll('.ch-row');
+                for (var i = 0; i < rows.length; i++) {
+                    if (rows[i].dataset.qid === questId && rows[i].dataset.ch === chapter) {
+                        rows[i].remove(); break;
+                    }
+                }
+            } else { showSave(false, data.error || 'ERROR'); }
+        }).catch(function(e) { showSave(false, e.message); });
+    }
+
+    function removeBook(questId, safeId) {
+        if (!confirm('This will ABANDON the quest and DELETE all scheduled chapters for this book. Continue?')) return;
+        fetch('/admin/recurring/remove-book', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ questId: questId })
+        }).then(function(r) { return r.json(); }).then(function(data) {
+            if (data.success) {
+                showSave(true, 'REMOVED');
+                var section = document.getElementById('book-' + safeId);
+                if (section) section.remove();
+            } else { showSave(false, data.error || 'ERROR'); }
+        }).catch(function(e) { showSave(false, e.message); });
+    }
+    </script>
+</body>
+</html>`);
+  } catch (err) {
+    console.error("Admin recurring page error:", err);
+    res.status(500).send(errorPage(err.message));
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Bulk add chapters
+// ---------------------------------------------------------------------------
+app.post("/admin/recurring/add-chapters", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { questId, count, startNum } = req.body;
+    if (!questId || !count) {
+      return res.status(400).json({ error: "questId and count are required" });
+    }
+    const start = Math.max(1, parseInt(startNum) || 1);
+    const n = Math.min(parseInt(count) || 10, 200);
+
+    const sheets = await getSheets();
+    const existing = await fetchScheduleData(sheets);
+    const existingChapters = new Set(
+      existing.filter(s => s["Quest ID"] === questId).map(s => parseInt(s["Chapter"]) || 0)
+    );
+
+    const newRows = [];
+    for (let i = start; i <= n; i++) {
+      if (!existingChapters.has(i)) {
+        newRows.push([questId, String(i), "", "30", "", "", ""]);
+      }
+    }
+
+    if (newRows.length > 0) {
+      await sheets.spreadsheets.values.append({
+        spreadsheetId: SPREADSHEET_ID,
+        range: "Schedule!A:G",
+        valueInputOption: "RAW",
+        insertDataOption: "INSERT_ROWS",
+        requestBody: { values: newRows },
+      });
+    }
+
+    res.json({ success: true, added: newRows.length });
+  } catch (err) {
+    console.error("Add chapters error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Update single chapter field
+// ---------------------------------------------------------------------------
+app.post("/admin/recurring/update-chapter", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { questId, chapter, field, value } = req.body;
+    if (!questId || !chapter || !field) {
+      return res.status(400).json({ error: "questId, chapter, and field are required" });
+    }
+
+    const fieldMap = { title: "Title", time: "Time", date: "Scheduled Date", completed: "Completed", details: "Details" };
+    const colName = fieldMap[field];
+    if (!colName) {
+      return res.status(400).json({ error: "Invalid field: " + field });
+    }
+
+    const sheets = await getSheets();
+    const schedRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Schedule",
+    });
+    const rows = schedRes.data.values;
+    if (!rows || rows.length < 2) {
+      return res.status(404).json({ error: "No schedule data found" });
+    }
+
+    const headers = rows[0];
+    const idCol = headers.indexOf("Quest ID");
+    const chCol = headers.indexOf("Chapter");
+    const targetCol = headers.indexOf(colName);
+    if (idCol < 0 || chCol < 0 || targetCol < 0) {
+      return res.status(500).json({ error: "Schedule sheet missing required columns" });
+    }
+
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][idCol] === questId && rows[i][chCol] === String(chapter)) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+    if (targetRow === -1) {
+      return res.status(404).json({ error: "Chapter not found" });
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Schedule!${colLetter(targetCol)}${targetRow}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[value || ""]] },
+    });
+
+    // Check if all chapters for this quest are now complete
+    let allDone = false;
+    if (field === "completed" && value === "X") {
+      const completedCol = headers.indexOf("Completed");
+      if (completedCol >= 0) {
+        const questChapters = rows.filter((r, i) => i > 0 && r[idCol] === questId);
+        // Count done: all except the one we just updated (check sheet value) + 1 for the one we just marked
+        const doneCount = questChapters.filter(r => (r[completedCol] || "").toUpperCase() === "X").length + 1; // +1 for the row we just updated
+        // But the row we just updated might already have been X (re-check), so count properly:
+        // Actually, the sheet data is stale (pre-update). The row we updated was NOT X before. So +1 is correct.
+        allDone = questChapters.length > 0 && doneCount >= questChapters.length;
+      }
+    }
+
+    res.json({ success: true, allDone });
+  } catch (err) {
+    console.error("Update chapter error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Enslave a recurring quest (all chapters done)
+// ---------------------------------------------------------------------------
+app.post("/admin/recurring/enslave", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { questId } = req.body;
+    if (!questId) return res.status(400).json({ error: "questId is required" });
+
+    const sheets = await getSheets();
+    const questsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quests",
+    });
+    const rows = questsRes.data.values;
+    if (!rows || rows.length < 2) return res.status(404).json({ error: "No quests found" });
+
+    const headers = rows[0];
+    const idCol = headers.indexOf("Quest ID");
+    const statusCol = headers.indexOf("Status");
+    const dateCompletedCol = headers.indexOf("Date Completed");
+    const dateResolvedCol = headers.indexOf("Date Resolved");
+    const bossCol = headers.indexOf("Boss");
+    const minionCol = headers.indexOf("Minion");
+    const sectorCol = headers.indexOf("Sector");
+
+    let targetRow = -1;
+    let questRow = null;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][idCol] === questId) { targetRow = i + 1; questRow = rows[i]; break; }
+    }
+    if (targetRow === -1) return res.status(404).json({ error: "Quest not found" });
+
+    const now = new Date().toISOString().slice(0, 10);
+    const updates = [
+      { range: `Quests!${colLetter(statusCol)}${targetRow}`, values: [["Approved"]] },
+    ];
+    if (dateCompletedCol >= 0) {
+      updates.push({ range: `Quests!${colLetter(dateCompletedCol)}${targetRow}`, values: [[now]] });
+    }
+    if (dateResolvedCol >= 0) {
+      updates.push({ range: `Quests!${colLetter(dateResolvedCol)}${targetRow}`, values: [[now]] });
+    }
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: "RAW", data: updates },
+    });
+
+    // Sync to Sectors (auto-enslaves on "Approved")
+    const qBoss = questRow[bossCol] || "";
+    const qMinion = questRow[minionCol] || "";
+    const qSector = questRow[sectorCol] || "";
+    if (qBoss && qMinion && qSector) {
+      await updateSectorsQuestStatus(sheets, qSector, qBoss, qMinion, "Approved");
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Enslave recurring error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Auto-schedule chapters
+// ---------------------------------------------------------------------------
+app.post("/admin/recurring/auto-schedule", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { questId, startDate, pattern } = req.body;
+    if (!questId || !startDate) {
+      return res.status(400).json({ error: "questId and startDate are required" });
+    }
+
+    const sheets = await getSheets();
+    const schedRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Schedule",
+    });
+    const rows = schedRes.data.values;
+    if (!rows || rows.length < 2) {
+      return res.status(404).json({ error: "No schedule data found" });
+    }
+
+    const headers = rows[0];
+    const idCol = headers.indexOf("Quest ID");
+    const chCol = headers.indexOf("Chapter");
+    const dateCol = headers.indexOf("Scheduled Date");
+    if (idCol < 0 || chCol < 0 || dateCol < 0) {
+      return res.status(500).json({ error: "Schedule sheet missing required columns" });
+    }
+
+    // Find unscheduled chapters for this quest, sorted by chapter number
+    const unscheduled = [];
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][idCol] === questId && !(rows[i][dateCol] || "").trim()) {
+        unscheduled.push({ rowIndex: i + 1, chapter: parseInt(rows[i][chCol]) || 0 });
+      }
+    }
+    unscheduled.sort((a, b) => a.chapter - b.chapter);
+
+    if (unscheduled.length === 0) {
+      return res.json({ success: true, scheduled: 0 });
+    }
+
+    // Build date list based on pattern
+    const patternDays = {
+      daily: [0, 1, 2, 3, 4, 5, 6],
+      weekdays: [1, 2, 3, 4, 5],
+      mwf: [1, 3, 5],
+      mtw: [1, 2, 3],
+    };
+    const allowedDays = patternDays[pattern] || patternDays.weekdays;
+
+    const dates = [];
+    const cursor = new Date(startDate + "T12:00:00");
+    while (dates.length < unscheduled.length) {
+      if (allowedDays.includes(cursor.getDay())) {
+        dates.push(cursor.toISOString().slice(0, 10));
+      }
+      cursor.setDate(cursor.getDate() + 1);
+    }
+
+    // Batch update dates
+    const dateColRef = colLetter(dateCol);
+    const updates = [];
+    for (let i = 0; i < unscheduled.length; i++) {
+      updates.push({
+        range: `Schedule!${dateColRef}${unscheduled[i].rowIndex}`,
+        values: [[dates[i]]],
+      });
+    }
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: { valueInputOption: "RAW", data: updates },
+    });
+
+    res.json({ success: true, scheduled: unscheduled.length });
+  } catch (err) {
+    console.error("Auto-schedule error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Delete a single chapter row from Schedule sheet
+// ---------------------------------------------------------------------------
+app.post("/admin/recurring/delete-chapter", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { questId, chapter } = req.body;
+    if (!questId || !chapter) {
+      return res.status(400).json({ error: "questId and chapter are required" });
+    }
+
+    const sheets = await getSheets();
+    const schedRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Schedule",
+    });
+    const rows = schedRes.data.values;
+    if (!rows || rows.length < 2) {
+      return res.status(404).json({ error: "No schedule data found" });
+    }
+
+    const headers = rows[0];
+    const idCol = headers.indexOf("Quest ID");
+    const chCol = headers.indexOf("Chapter");
+
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if (rows[i][idCol] === questId && rows[i][chCol] === String(chapter)) {
+        targetRow = i;
+        break;
+      }
+    }
+    if (targetRow === -1) {
+      return res.status(404).json({ error: "Chapter not found" });
+    }
+
+    // Get Schedule sheet's numeric sheetId
+    const spreadsheet = await sheets.spreadsheets.get({
+      spreadsheetId: SPREADSHEET_ID,
+      fields: "sheets.properties",
+    });
+    const schedSheet = spreadsheet.data.sheets.find(s => s.properties.title === "Schedule");
+    if (!schedSheet) {
+      return res.status(500).json({ error: "Schedule sheet not found" });
+    }
+    const sheetId = schedSheet.properties.sheetId;
+
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        requests: [{
+          deleteDimension: {
+            range: { sheetId, dimension: "ROWS", startIndex: targetRow, endIndex: targetRow + 1 }
+          }
+        }]
+      }
+    });
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Delete chapter error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Remove entire book (abandon quest + delete all schedule rows)
+// ---------------------------------------------------------------------------
+app.post("/admin/recurring/remove-book", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { questId } = req.body;
+    if (!questId) {
+      return res.status(400).json({ error: "questId is required" });
+    }
+
+    const sheets = await getSheets();
+    const loggedInUser = (req.cookies && req.cookies.userName) || (req.cookies && req.cookies.userEmail) || "Unknown";
+
+    // 1. Mark quest as Abandoned in Quests sheet (same pattern as /quest/remove)
+    const questsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quests",
+    });
+    const qRows = questsRes.data.values;
+    if (qRows && qRows.length >= 2) {
+      const qHeaders = qRows[0];
+      const qIdCol = qHeaders.indexOf("Quest ID");
+      const qStatusCol = qHeaders.indexOf("Status");
+      const qBossCol = qHeaders.indexOf("Boss");
+      const qMinionCol = qHeaders.indexOf("Minion");
+      const qSectorCol = qHeaders.indexOf("Sector");
+      const qDateCol = qHeaders.indexOf("Date Completed");
+      const qResolvedCol = qHeaders.indexOf("Date Resolved");
+
+      for (let i = 1; i < qRows.length; i++) {
+        if (qRows[i][qIdCol] === questId) {
+          const updatedRow = [...qRows[i]];
+          while (updatedRow.length < qHeaders.length) updatedRow.push("");
+          const now = new Date().toISOString().slice(0, 10);
+          updatedRow[qStatusCol] = "Abandoned";
+          updatedRow[qDateCol] = `${now} | Abandoned by: ${loggedInUser}`;
+          if (qResolvedCol >= 0) updatedRow[qResolvedCol] = now;
+
+          await sheets.spreadsheets.values.update({
+            spreadsheetId: SPREADSHEET_ID,
+            range: `Quests!A${i + 1}:${colLetter(qHeaders.length - 1)}${i + 1}`,
+            valueInputOption: "RAW",
+            requestBody: { values: [updatedRow] },
+          });
+
+          // Clear sector quest status
+          const qSector = qRows[i][qSectorCol];
+          const qBoss = qRows[i][qBossCol];
+          const qMinion = qRows[i][qMinionCol];
+          if (qSector && qBoss && qMinion) {
+            await updateSectorsQuestStatus(sheets, qSector, qBoss, qMinion, "");
+          }
+          break;
+        }
+      }
+    }
+
+    // 2. Delete all Schedule rows for this questId
+    const schedRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Schedule",
+    });
+    const sRows = schedRes.data.values;
+    if (sRows && sRows.length >= 2) {
+      const sHeaders = sRows[0];
+      const sIdCol = sHeaders.indexOf("Quest ID");
+
+      // Collect matching row indices (0-based)
+      const toDelete = [];
+      for (let i = 1; i < sRows.length; i++) {
+        if (sRows[i][sIdCol] === questId) toDelete.push(i);
+      }
+
+      if (toDelete.length > 0) {
+        // Get Schedule sheet's numeric sheetId
+        const spreadsheet = await sheets.spreadsheets.get({
+          spreadsheetId: SPREADSHEET_ID,
+          fields: "sheets.properties",
+        });
+        const schedSheet = spreadsheet.data.sheets.find(s => s.properties.title === "Schedule");
+        if (schedSheet) {
+          const sheetId = schedSheet.properties.sheetId;
+          // Delete in reverse order so row indices remain valid
+          const requests = toDelete.reverse().map(rowIdx => ({
+            deleteDimension: {
+              range: { sheetId, dimension: "ROWS", startIndex: rowIdx, endIndex: rowIdx + 1 }
+            }
+          }));
+          await sheets.spreadsheets.batchUpdate({
+            spreadsheetId: SPREADSHEET_ID,
+            requestBody: { requests }
+          });
+        }
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Remove book error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -6082,7 +7111,7 @@ app.get("/badges", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Badges page error:", err);
-    res.status(500).send(`<pre style="background:#0a0b10;color:#ff0000;padding:20px;font-family:monospace;">BADGES ERROR\n\n${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -6165,7 +7194,7 @@ app.get("/army", async (req, res) => {
         const trClass = [isSurvival && "survival-row", isRecent && "recent-row"].filter(Boolean).join(" ");
         rows += `<tr${trClass ? ` class="${trClass}"` : ''}>
           ${bossCell}
-          <td>${escHtml(m["Minion"])}</td>
+          <td>${escHtml(bookTitle(m["Minion"]))}</td>
           <td class="date-col">${m._enslavedDate || "—"}</td>
           <td style="color:#00f2ff">${nInt}</td>
           <td style="color:#00ff9d">${nSta}</td>
@@ -6330,7 +7359,7 @@ app.get("/army", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Army page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -6424,7 +7453,7 @@ app.get("/defiant", async (req, res) => {
           <td>${questBtn}</td>
           ${bossCell}
           <td title="${escHtml(m["Task"] || "")}">
-            ${escHtml(m["Minion"])}${recurTag}
+            ${escHtml(bookTitle(m["Minion"]))}${recurTag}
             ${spText ? `<div style="font-size:0.75em;color:#ff0044;margin-top:2px;text-transform:none;">Requires: ${escHtml(spText)}</div>` : ""}
           </td>
           <td style="color:${sc};font-weight:bold;">${m["Status"]}</td>
@@ -6630,7 +7659,7 @@ app.get("/defiant", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Defiant page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -7062,7 +8091,8 @@ app.get("/progress", async (req, res) => {
       // Bars with current stat values for each of the last 7 days
       for (let di = 0; di < 7; di++) {
         const dayDate = new Date(); dayDate.setDate(dayDate.getDate() - 6 + di);
-        const label = String(dayDate.getMonth() + 1).padStart(2, "0") + "-" + String(dayDate.getDate()).padStart(2, "0");
+        const MONTH_ABBR_E = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
+        const label = MONTH_ABBR_E[dayDate.getMonth()] + " " + dayDate.getDate();
         const groupX = ePadL + di * eGroupW + 2;
         for (let si = 0; si < statNames.length; si++) {
           const stat = statNames[si];
@@ -7116,10 +8146,21 @@ app.get("/progress", async (req, res) => {
         return dateStr.slice(0, 7); // YYYY-MM
       };
 
+      const MONTH_ABBR = ["JAN","FEB","MAR","APR","MAY","JUN","JUL","AUG","SEP","OCT","NOV","DEC"];
       const formatBucket = (b) => {
-        if (bucketMode === "day") return b.slice(5); // MM-DD
-        if (bucketMode === "week") return "W" + b.slice(5); // WMM-DD
-        return b; // YYYY-MM
+        if (bucketMode === "day") {
+          const d = new Date(b + "T00:00:00");
+          return MONTH_ABBR[d.getMonth()] + " " + d.getDate();
+        }
+        if (bucketMode === "week") {
+          const d = new Date(b + "T00:00:00");
+          return MONTH_ABBR[d.getMonth()] + " " + d.getDate();
+        }
+        if (bucketMode === "month") {
+          const d = new Date(b + "-01T00:00:00");
+          return MONTH_ABBR[d.getMonth()];
+        }
+        return b;
       };
 
       // Accumulate points EARNED per bucket per stat (not cumulative)
@@ -7707,7 +8748,7 @@ app.get("/progress", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Progress page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -7720,7 +8761,7 @@ function buildAdminPage(pendingCount) {
   const functions = [
     { id: "quests", title: questTitle, desc: pendingCount > 0 ? `${pendingCount} quest${pendingCount > 1 ? "s" : ""} awaiting approval.` : "No quests pending. Check back later.", href: "/admin/quests", active: true },
     { id: "manual", title: "MANUAL ENTRY", desc: "Add new objectives (minions) directly without opening Google Sheets.", href: "/admin/manual", active: true },
-    { id: "curriculum", title: "CURRICULUM PLANNER", desc: "Browse and assign objectives by sector. Edit tasks and batch-add to quest board.", href: "/admin/curriculum", active: true },
+    { id: "curriculum", title: "CURRICULUM PLANNER", desc: "Browse and assign objectives by sector. Edit tasks, manage chapter schedules, and batch-add to quest board.", href: "/admin/curriculum", active: true },
     { id: "locks", title: "LOCK/UNLOCK", desc: "Manage prerequisites and locked objectives.", href: "/admin/locks", active: true },
     { id: "import", title: "PHOTO IMPORT", desc: "Upload lesson photos for AI classification and auto-import to the tracker.", href: "/admin/import", active: true },
     { id: "notes", title: "TEACHER NOTES", desc: "Leave notes, observations, and communication for other teachers.", href: "/admin/notes", active: true },
@@ -7935,7 +8976,7 @@ app.get("/admin/quests", async (req, res) => {
           <div class="qa-target">
             <span class="qa-boss">${escHtml(q["Boss"])}</span>
             <span class="qa-arrow">&gt;</span>
-            <span class="qa-minion">${escHtml(q["Minion"])}</span>${(q["Recurring"] || "").toUpperCase() === "X" ? '<span style="font-size:0.65em;color:#00f2ff;border:1px solid #00f2ff;padding:1px 4px;margin-left:6px;letter-spacing:1px;vertical-align:middle;">REC</span>' : ''}
+            <span class="qa-minion">${escHtml(bookTitle(q["Minion"]))}</span>${(q["Recurring"] || "").toUpperCase() === "X" ? '<span style="font-size:0.65em;color:#00f2ff;border:1px solid #00f2ff;padding:1px 4px;margin-left:6px;letter-spacing:1px;vertical-align:middle;">REC</span>' : ''}
           </div>
           <div class="qa-sector">SECTOR: ${escHtml(q["Sector"])}</div>
           <div class="qa-task"><span class="qa-task-label">TASK:</span> ${q["Suggested By AI"] || "No details"}</div>
@@ -8073,7 +9114,7 @@ app.get("/admin/quests", async (req, res) => {
               <div class="qa-target">
                 <span class="qa-boss">${escHtml(q["Boss"])}</span>
                 <span class="qa-arrow">&gt;</span>
-                <span class="qa-minion">${escHtml(q["Minion"])}</span>
+                <span class="qa-minion">${escHtml(bookTitle(q["Minion"]))}</span>
               </div>
               <div class="qa-actions">
                 <form method="POST" action="/admin/quests/unapprove" style="display:inline;">
@@ -8125,7 +9166,7 @@ app.get("/admin/quests", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Quest approval page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8155,8 +9196,6 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
   const dateResolvedCol = headers.indexOf("Date Resolved");
   const feedbackCol = headers.indexOf("Feedback");
   const timeSpentCol = headers.indexOf("Time Spent");
-  const colRef = (col) => String.fromCharCode(65 + col);
-
   let targetRowIdx = -1;
   let questRow = null;
   for (let i = 1; i < rows.length; i++) {
@@ -8170,12 +9209,12 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
 
   const now = new Date().toISOString().slice(0, 10);
   const updates = [{
-    range: "Quests!" + colRef(statusCol) + targetRowIdx,
+    range: "Quests!" + colLetter(statusCol) + targetRowIdx,
     values: [[newStatus]],
   }];
   if (clearDate && dateCol >= 0) {
     updates.push({
-      range: "Quests!" + colRef(dateCol) + targetRowIdx,
+      range: "Quests!" + colLetter(dateCol) + targetRowIdx,
       values: [[""]],
     });
   }
@@ -8183,7 +9222,7 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
   // Approve/Reject: set Date Resolved (quest is no longer active)
   if ((newStatus === "Approved" || newStatus === "Rejected") && dateResolvedCol >= 0) {
     updates.push({
-      range: "Quests!" + colRef(dateResolvedCol) + targetRowIdx,
+      range: "Quests!" + colLetter(dateResolvedCol) + targetRowIdx,
       values: [[now]],
     });
   }
@@ -8191,7 +9230,7 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
   // Reopen or un-approve back to Submitted: clear Date Resolved
   if ((clearDate || newStatus === "Submitted") && dateResolvedCol >= 0) {
     updates.push({
-      range: "Quests!" + colRef(dateResolvedCol) + targetRowIdx,
+      range: "Quests!" + colLetter(dateResolvedCol) + targetRowIdx,
       values: [[""]],
     });
   }
@@ -8200,7 +9239,7 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
   if (feedbackCol >= 0) {
     const feedback = clearDate ? "" : (req.body.feedback || "");
     updates.push({
-      range: "Quests!" + colRef(feedbackCol) + targetRowIdx,
+      range: "Quests!" + colLetter(feedbackCol) + targetRowIdx,
       values: [[feedback]],
     });
   }
@@ -8208,7 +9247,7 @@ async function findQuestAndUpdate(req, res, newStatus, clearDate) {
   // Write teacher-updated time spent (if provided)
   if (timeSpentCol >= 0 && req.body.timeSpent !== undefined && req.body.timeSpent !== "") {
     updates.push({
-      range: "Quests!" + colRef(timeSpentCol) + targetRowIdx,
+      range: "Quests!" + colLetter(timeSpentCol) + targetRowIdx,
       values: [[req.body.timeSpent]],
     });
   }
@@ -8234,7 +9273,7 @@ app.post("/admin/quests/approve", async (req, res) => {
     await findQuestAndUpdate(req, res, "Approved", false);
   } catch (err) {
     console.error("Quest approve error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8243,7 +9282,7 @@ app.post("/admin/quests/reject", async (req, res) => {
     await findQuestAndUpdate(req, res, "Rejected", false);
   } catch (err) {
     console.error("Quest reject error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8252,7 +9291,7 @@ app.post("/admin/quests/reopen", async (req, res) => {
     await findQuestAndUpdate(req, res, "Active", true);
   } catch (err) {
     console.error("Quest reopen error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8261,7 +9300,7 @@ app.post("/admin/quests/unapprove", async (req, res) => {
     await findQuestAndUpdate(req, res, "Submitted", false);
   } catch (err) {
     console.error("Quest unapprove error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8288,7 +9327,6 @@ app.post("/admin/quests/bulk-approve", async (req, res) => {
     const sectorCol = headers.indexOf("Sector");
     const dateResolvedCol = headers.indexOf("Date Resolved");
     const feedbackCol = headers.indexOf("Feedback");
-    const colRef = (col) => String.fromCharCode(65 + col);
     const now = new Date().toISOString().slice(0, 10);
 
     const updates = [];
@@ -8298,12 +9336,12 @@ app.post("/admin/quests/bulk-approve", async (req, res) => {
       for (let i = 1; i < rows.length; i++) {
         if (rows[i][idCol] !== qId) continue;
         const rowNum = i + 1;
-        updates.push({ range: "Quests!" + colRef(statusCol) + rowNum, values: [["Approved"]] });
+        updates.push({ range: "Quests!" + colLetter(statusCol) + rowNum, values: [["Approved"]] });
         if (dateResolvedCol >= 0) {
-          updates.push({ range: "Quests!" + colRef(dateResolvedCol) + rowNum, values: [[now]] });
+          updates.push({ range: "Quests!" + colLetter(dateResolvedCol) + rowNum, values: [[now]] });
         }
         if (feedbackCol >= 0) {
-          updates.push({ range: "Quests!" + colRef(feedbackCol) + rowNum, values: [[feedback || ""]] });
+          updates.push({ range: "Quests!" + colLetter(feedbackCol) + rowNum, values: [[feedback || ""]] });
         }
         sectorsToSync.push({
           sector: rows[i][sectorCol],
@@ -8321,16 +9359,18 @@ app.post("/admin/quests/bulk-approve", async (req, res) => {
       });
     }
 
-    for (const s of sectorsToSync) {
-      if (s.boss && s.minion && s.sector) {
-        await updateSectorsQuestStatus(sheets, s.sector, s.boss, s.minion, "Approved");
-      }
+    // Batch sync all approved quests to Sectors in one API call
+    const batchItems = sectorsToSync
+      .filter(s => s.boss && s.minion && s.sector)
+      .map(s => ({ sector: s.sector, boss: s.boss, minion: s.minion, questStatus: "Approved" }));
+    if (batchItems.length > 0) {
+      await batchUpdateSectorsQuestStatus(sheets, batchItems);
     }
 
     res.redirect("/admin/quests");
   } catch (err) {
     console.error("Bulk approve error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8339,22 +9379,18 @@ app.post("/admin/quests/sync", async (req, res) => {
     const sheets = await getSheets();
     const quests = await fetchQuestsData(sheets);
 
-    let synced = 0;
-    for (const q of quests) {
-      const boss = q["Boss"];
-      const minion = q["Minion"];
-      const sector = q["Sector"];
-      const status = q["Status"];
-      if (boss && minion && sector && status) {
-        await updateSectorsQuestStatus(sheets, sector, boss, minion, status);
-        synced++;
-      }
+    // Batch sync all quest statuses to Sectors in one API call
+    const batchItems = quests
+      .filter(q => q["Boss"] && q["Minion"] && q["Sector"] && q["Status"])
+      .map(q => ({ sector: q["Sector"], boss: q["Boss"], minion: q["Minion"], questStatus: q["Status"] }));
+    if (batchItems.length > 0) {
+      await batchUpdateSectorsQuestStatus(sheets, batchItems);
     }
 
     res.redirect("/admin/quests");
   } catch (err) {
     console.error("Quest sync error:", err);
-    res.status(500).send(`<pre style="color:red">Error syncing quests: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8866,7 +9902,7 @@ app.get("/admin/locks", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Lock/unlock page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8889,11 +9925,6 @@ app.post("/admin/locks/update", async (req, res) => {
     const minionCol = headers.indexOf("Minion");
     const statusCol = headers.indexOf("Status");
     const lockedCol = headers.indexOf("Locked for what?");
-
-    const colLetter = (idx) => {
-      if (idx < 26) return String.fromCharCode(65 + idx);
-      return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
-    };
 
     let found = false;
     const updates = [];
@@ -8921,7 +9952,7 @@ app.post("/admin/locks/update", async (req, res) => {
     res.redirect("/admin/locks");
   } catch (err) {
     console.error("Lock update error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8943,11 +9974,6 @@ app.post("/admin/locks/bulk-lock", async (req, res) => {
     const bossCol = headers.indexOf("Boss");
     const statusCol = headers.indexOf("Status");
     const lockedCol = headers.indexOf("Locked for what?");
-
-    const colLetter = (idx) => {
-      if (idx < 26) return String.fromCharCode(65 + idx);
-      return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
-    };
 
     const updates = [];
     for (let i = 1; i < rows.length; i++) {
@@ -8972,7 +9998,7 @@ app.post("/admin/locks/bulk-lock", async (req, res) => {
     res.redirect("/admin/locks");
   } catch (err) {
     console.error("Bulk lock error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -8995,11 +10021,6 @@ async function checkAndUnlockPrerequisites(sheets) {
   const lockedCol = headers.indexOf("Locked for what?");
 
   if (lockedCol < 0 || statusCol < 0) return;
-
-  const colLetter = (idx) => {
-    if (idx < 26) return String.fromCharCode(65 + idx);
-    return String.fromCharCode(64 + Math.floor(idx / 26)) + String.fromCharCode(65 + (idx % 26));
-  };
 
   // Build lookup of all minions by status
   const minionStatus = {}; // "BOSS>MINION" -> status
@@ -9610,7 +10631,7 @@ app.get("/admin/manual", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Manual entry page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -9712,8 +10733,11 @@ app.post("/admin/manual", async (req, res) => {
           });
         }
 
-        for (const er of engagedRows) {
-          await updateSectorsQuestStatus(sheets, sector, boss, er.minionName, "Active", { dueDate: dueDate || "" });
+        const batchItems = engagedRows.map(er => ({
+          sector, boss, minion: er.minionName, questStatus: "Active", options: { dueDate: dueDate || "" }
+        }));
+        if (batchItems.length > 0) {
+          await batchUpdateSectorsQuestStatus(sheets, batchItems);
         }
         questAdded = true;
       }
@@ -9728,7 +10752,7 @@ app.post("/admin/manual", async (req, res) => {
     }
   } catch (err) {
     console.error("Manual entry error:", err);
-    res.status(500).send(`<pre style="color:red">Error adding minion(s): ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -9804,10 +10828,10 @@ app.get("/admin/curriculum", async (req, res) => {
           const sc = statusColor[m["Status"]] || "#555";
 
           let checkCell;
-          if (onQuest) {
-            checkCell = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
-          } else if (isEnslaved) {
+          if (isEnslaved) {
             checkCell = `<span style="color:#00ff9d;" title="Enslaved">&#x2713;</span>`;
+          } else if (onQuest) {
+            checkCell = `<span style="color:#ffea00;text-shadow:0 0 6px #ffea00;" title="On quest board">&#x2605;</span>`;
           } else if (m["Status"] === "Engaged") {
             checkCell = `<input type="checkbox" class="cur-chk" data-boss="${escHtml(m["Boss"])}" data-minion="${escHtml(m["Minion"])}" data-sector="${escHtml(sector)}"${isRec ? ' data-recurring="1"' : ''}>`;
           } else {
@@ -9820,9 +10844,12 @@ app.get("/admin/curriculum", async (req, res) => {
 
           const recTag = isRec ? `<span class="cur-rec-tag">REC</span>` : "";
 
+          const minionSafeId = "m_" + safeId;
+          const minionCell = `<span class="cur-minion-display" id="md-${minionSafeId}">${escHtml(bookTitle(m["Minion"]))}</span><input type="text" class="cur-minion-input" id="mi-${minionSafeId}" value="${escHtml(m["Minion"])}" style="display:none;" data-sector="${escHtml(sector)}" data-boss="${escHtml(boss)}" data-minion="${escHtml(m["Minion"])}"><span class="cur-task-edit" onclick="toggleMinionEdit('${minionSafeId}')" title="Edit minion name">&#x270E;</span><button class="cur-task-save" id="ms-${minionSafeId}" onclick="saveMinion('${minionSafeId}')" style="display:none;">&#x2713;</button>`;
+
           rows += `<tr class="${isEnslaved ? 'cur-enslaved' : ''}">
             <td>${checkCell}</td>
-            <td>${escHtml(m["Minion"])}${recTag}</td>
+            <td class="cur-task-cell">${minionCell}${recTag}</td>
             <td class="cur-task-cell">${taskCell}</td>
             <td style="color:${sc};font-weight:bold;">${m["Status"]}</td>
             <td>${m["Impact(1-3)"] || ""}</td>
@@ -9912,6 +10939,14 @@ app.get("/admin/curriculum", async (req, res) => {
     .cur-table input[type="checkbox"] { accent-color: #ff6600; width: 16px; height: 16px; cursor: pointer; }
     .cur-rec-tag { font-size: 0.65em; color: #00f2ff; border: 1px solid #00f2ff; padding: 1px 4px; margin-left: 6px; letter-spacing: 1px; vertical-align: middle; }
 
+    /* Minion name editing */
+    .cur-minion-display { color: #00f2ff; }
+    .cur-minion-input {
+        width: 70%; padding: 3px 6px; background: #1a1d26; border: 1px solid #00f2ff; color: #00f2ff;
+        font-family: 'Courier New', monospace; font-size: 0.95em; text-transform: none;
+    }
+    .cur-minion-input:focus { outline: none; box-shadow: 0 0 5px rgba(0,242,255,0.3); }
+
     /* Task editing */
     .cur-task-cell { text-transform: none; position: relative; }
     .cur-task-display { color: #ccc; }
@@ -9989,7 +11024,7 @@ app.get("/admin/curriculum", async (req, res) => {
 </head>
 <body>
     <div class="hud-container">
-        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin">&lt; ADMIN</a><a class="back-link" href="/">&lt; HUD</a></div>
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin">&lt; ADMIN</a><a class="back-link" href="/">&lt; HUD</a><a class="back-link" href="/admin/recurring" style="border-color:#00f2ff;">&#x1F4D6; CHAPTER SCHEDULE</a></div>
         <h1>&#x1F4DA; Curriculum Planner</h1>
         <div class="cur-subtitle">BROWSE &amp; ASSIGN OBJECTIVES BY SECTOR</div>
         ${successMsg}
@@ -10084,6 +11119,39 @@ app.get("/admin/curriculum", async (req, res) => {
         document.querySelectorAll('.cur-sector').forEach(function(s) {
             s.style.display = (sec === 'ALL' || s.dataset.sector === sec) ? '' : 'none';
         });
+    }
+
+    // Minion name inline edit
+    function toggleMinionEdit(id) {
+        var display = document.getElementById('md-' + id);
+        var input = document.getElementById('mi-' + id);
+        var save = document.getElementById('ms-' + id);
+        if (!display || !input) return;
+        var editing = input.style.display !== 'none';
+        display.style.display = editing ? '' : 'none';
+        input.style.display = editing ? 'none' : '';
+        save.style.display = editing ? 'none' : '';
+        if (!editing) input.focus();
+    }
+    function saveMinion(id) {
+        var input = document.getElementById('mi-' + id);
+        if (!input || !input.value.trim()) { alert('Minion name cannot be empty'); return; }
+        var data = { sector: input.dataset.sector, boss: input.dataset.boss, oldMinion: input.dataset.minion, newMinion: input.value.trim() };
+        fetch('/admin/curriculum/update-minion', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(data)
+        }).then(function(r) { return r.json(); }).then(function(res) {
+            if (res.success) {
+                var display = document.getElementById('md-' + id);
+                var fullName = input.value.trim();
+                display.textContent = fullName.split('|')[0].trim();
+                input.dataset.minion = fullName;
+                toggleMinionEdit(id);
+            } else {
+                alert('Error: ' + (res.error || 'Unknown'));
+            }
+        }).catch(function(e) { alert('Error saving: ' + e.message); });
     }
 
     // Task inline edit
@@ -10203,7 +11271,7 @@ app.get("/admin/curriculum", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Curriculum planner error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -10247,10 +11315,9 @@ app.post("/admin/curriculum/update-task", async (req, res) => {
       return res.status(404).json({ error: "Minion not found" });
     }
 
-    const colRef = String.fromCharCode(65 + taskCol);
     await sheets.spreadsheets.values.update({
       spreadsheetId: SPREADSHEET_ID,
-      range: `Sectors!${colRef}${targetRow}`,
+      range: `Sectors!${colLetter(taskCol)}${targetRow}`,
       valueInputOption: "RAW",
       requestBody: { values: [[task || ""]] },
     });
@@ -10258,6 +11325,88 @@ app.post("/admin/curriculum/update-task", async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("Update task error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Admin: Update minion name
+// ---------------------------------------------------------------------------
+app.post("/admin/curriculum/update-minion", async (req, res) => {
+  try {
+    if (req.cookies.role !== "teacher") {
+      return res.status(403).json({ error: "Teacher access required" });
+    }
+    const { sector, boss, oldMinion, newMinion } = req.body;
+    if (!sector || !boss || !oldMinion || !newMinion) {
+      return res.status(400).json({ error: "Sector, boss, old minion name, and new minion name are required" });
+    }
+
+    const sheets = await getSheets();
+    const sectorsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Sectors",
+    });
+    const rows = sectorsRes.data.values;
+    if (!rows || rows.length < 2) {
+      return res.status(404).json({ error: "No Sectors data found" });
+    }
+
+    const headers = rows[0];
+    const sectorCol = headers.findIndex(h => h.toLowerCase() === "sector");
+    const bossCol = headers.findIndex(h => h.toLowerCase() === "boss");
+    const minionCol = headers.findIndex(h => h.toLowerCase() === "minion");
+    if (minionCol < 0) {
+      return res.status(500).json({ error: "Minion column not found in Sectors sheet" });
+    }
+
+    let targetRow = -1;
+    for (let i = 1; i < rows.length; i++) {
+      if ((rows[i][sectorCol] || "") === sector && (rows[i][bossCol] || "") === boss && (rows[i][minionCol] || "") === oldMinion) {
+        targetRow = i + 1;
+        break;
+      }
+    }
+    if (targetRow === -1) {
+      return res.status(404).json({ error: "Minion not found" });
+    }
+
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `Sectors!${colLetter(minionCol)}${targetRow}`,
+      valueInputOption: "RAW",
+      requestBody: { values: [[newMinion]] },
+    });
+
+    // Also update minion name in Quests sheet if it exists there
+    const questsData = await fetchQuestsData(sheets);
+    const questsRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Quests",
+    });
+    const qRows = questsRes.data.values;
+    if (qRows && qRows.length > 1) {
+      const qHeaders = qRows[0];
+      const qBossCol = qHeaders.findIndex(h => h.toLowerCase() === "boss");
+      const qMinionCol = qHeaders.findIndex(h => h.toLowerCase() === "minion");
+      if (qMinionCol >= 0) {
+        const qMinionLetter = colLetter(qMinionCol);
+        for (let i = 1; i < qRows.length; i++) {
+          if ((qRows[i][qBossCol] || "") === boss && (qRows[i][qMinionCol] || "") === oldMinion) {
+            await sheets.spreadsheets.values.update({
+              spreadsheetId: SPREADSHEET_ID,
+              range: `Quests!${qMinionLetter}${i + 1}`,
+              valueInputOption: "RAW",
+              requestBody: { values: [[newMinion]] },
+            });
+          }
+        }
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error("Update minion error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -10346,7 +11495,7 @@ app.get("/admin/notes", async (req, res) => {
 </html>`);
   } catch (err) {
     console.error("Teacher notes page error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -10372,7 +11521,7 @@ app.post("/admin/notes", async (req, res) => {
     res.redirect("/admin/notes?added=1");
   } catch (err) {
     console.error("Add note error:", err);
-    res.status(500).send(`<pre style="color:red">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
@@ -10959,7 +12108,7 @@ app.get("/admin/test-email", async (req, res) => {
     res.send(`<pre style="color:#00ff9d;background:#0a0b10;padding:20px;font-family:monospace;">Weekly summary email sent! Check teacher inboxes.</pre>`);
   } catch (err) {
     console.error("Test email error:", err);
-    res.status(500).send(`<pre style="color:red;background:#0a0b10;padding:20px;">Error: ${err.message}</pre>`);
+    res.status(500).send(errorPage(err.message));
   }
 });
 
