@@ -392,7 +392,7 @@ async function sendWeeklySummaryEmail() {
   const dateRange = `${fmtDate(weekStart)} – ${fmtDate(now)}`;
 
   // Build HTML email
-  const esc = (s) => String(s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+  const esc = escHtml;
 
   let completedRows = "";
   for (const q of completedThisWeek) {
@@ -1482,6 +1482,11 @@ function escHtml(str) {
 // Extract display title from "Title | Author, Year" format (strips metadata after |)
 function bookTitle(name) {
   return (name || "").split("|")[0].trim();
+}
+
+// Normalize a raw value to a percentage of max (for radar charts, progress bars)
+function norm(raw, max) {
+  return ((parseFloat(raw) || 0) / max * 100).toFixed(1);
 }
 
 // Enrich quest Minion names from Sectors sheet (Sectors is the single source of truth)
@@ -2809,7 +2814,7 @@ function toggleSector(sectorId) {
 // ---------------------------------------------------------------------------
 function buildBossPage(bossName, sector, minions, totals, activeQuestKeys, isSurvivalBoss) {
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
-  const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+
   const survivalBadge = isSurvivalBoss
     ? `<div class="survival-badge"><svg width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:3px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg> SURVIVAL MODE GUARDIAN</div>`
     : "";
@@ -3739,7 +3744,7 @@ app.get("/boss/:bossName", async (req, res) => {
 // ---------------------------------------------------------------------------
 function buildSectorPage(sectorName, bosses, totals, activeQuestKeys, survivalBossNames) {
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
-  const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+
   const survivalSet = survivalBossNames || new Set();
   const heartSvgIcon = `<svg width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:3px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
 
@@ -3989,7 +3994,7 @@ app.get("/sector/:sectorName", async (req, res) => {
 // ---------------------------------------------------------------------------
 function buildGuardiansPage(bosses, totals, activeQuestKeys, survivalBossKeys) {
   const statusColor = { Enslaved: "#00ff9d", Engaged: "#ff6600", Locked: "#555" };
-  const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+
 
   const heartSvgIcon = `<svg width="14" height="12" viewBox="0 0 10 9" shape-rendering="crispEdges" style="vertical-align:middle;margin-right:3px;" filter="drop-shadow(0 0 2px #ff4444)"><rect x="1" y="0" width="3" height="1" fill="#ff4444"/><rect x="6" y="0" width="3" height="1" fill="#ff4444"/><rect x="0" y="1" width="10" height="1" fill="#ff4444"/><rect x="0" y="2" width="10" height="1" fill="#ff4444"/><rect x="1" y="3" width="8" height="1" fill="#ff4444"/><rect x="2" y="4" width="6" height="1" fill="#ff4444"/><rect x="3" y="5" width="4" height="1" fill="#ff4444"/><rect x="4" y="6" width="2" height="1" fill="#ff4444"/><rect x="1" y="1" width="2" height="1" fill="#ff8888"/></svg>`;
 
@@ -4576,7 +4581,8 @@ function buildQuestBoardPage(cardHtml, expandHtml, activeCount, totalCount, recu
 <body>
     <div class="hud-container">
         <div style="display:flex;gap:10px;margin-bottom:15px;">
-            <a class="back-link" href="/" style="margin-bottom:0;">&lt; BACK TO HUD</a>
+            <a class="back-link" href="/" style="margin-bottom:0;">&lt; HUD</a>
+            <a class="back-link" href="/today" style="margin-bottom:0;border-color:#ff8800;color:#ff8800;">TODAY</a>
             <a class="back-link" href="/recurring" style="margin-bottom:0;border-color:#00f2ff;color:#00f2ff;">RECURRING (${recurringCount}) &gt;</a>
         </div>
         <h1>Quest Board</h1>
@@ -5240,6 +5246,7 @@ app.get("/today", async (req, res) => {
     });
     overdueChapters.sort((a, b) => (a["Scheduled Date"] || "").localeCompare(b["Scheduled Date"] || "") || (parseInt(a["Chapter"]) || 0) - (parseInt(b["Chapter"]) || 0));
 
+
     // 3. Recent completions with reflections (last 5 approved)
     const recentCompleted = quests
       .filter(q => q["Status"] === "Approved" && q["Date Resolved"])
@@ -5250,7 +5257,10 @@ app.get("/today", async (req, res) => {
     const submitted = quests.filter(q => q["Status"] === "Submitted" && (q["Recurring"] || "").toUpperCase() !== "X");
 
     // Build active quests HTML
+    const definitions = sheetData.definitions;
+    const artifactOptions = getArtifactOptions(definitions);
     let activeHtml = "";
+    let activeExpandHtml = "";
     if (sortedActive.length === 0) {
       activeHtml = '<div class="today-empty">NO ACTIVE QUESTS. VISIT THE QUEST BOARD TO START ONE.</div>';
     } else {
@@ -5262,8 +5272,9 @@ app.get("/today", async (req, res) => {
           ? `<span class="today-badge today-overdue">OVERDUE ${dueDate}</span>`
           : dueDate ? `<span class="today-badge today-due">DUE ${dueDate}</span>` : "";
         const rejectBadge = isRejected ? `<span class="today-badge today-rejected">REJECTED</span>` : "";
+        const aid = (q["Quest ID"] || "").replace(/[^A-Z0-9]/gi, "");
         activeHtml += `
-          <a href="/quests" class="today-card-link"><div class="today-card${isOverdue ? " today-card-overdue" : ""}">
+          <div class="today-card ta-card${isOverdue ? " today-card-overdue" : ""}" data-aid="${aid}" onclick="toggleActive('${aid}')">
             <div class="today-card-top">
               <span class="today-minion">${escHtml(bookTitle(q["Minion"]))}</span>
               <div class="today-badges">${rejectBadge}${dueBadge}</div>
@@ -5272,26 +5283,79 @@ app.get("/today", async (req, res) => {
               <span class="today-boss">${escHtml(q["Boss"])}</span>
               <span class="today-sector">${escHtml(q["Sector"])}</span>
             </div>
-            ${q["Suggested By AI"] ? `<div class="today-task">${escHtml(q["Suggested By AI"])}</div>` : ""}
-          </div></a>`;
+          </div>`;
+
+        // Build submit form (same as quest board)
+        const currentType = q["Proof Type"] || "";
+        const opts = artifactOptions.map((opt) =>
+          `<option value="${escHtml(opt)}"${opt === currentType ? " selected" : ""}>${escHtml(opt)}</option>`
+        ).join("");
+        const submitForm = `<form class="quest-submit-form" method="POST" action="/quest/submit">
+             <input type="hidden" name="questId" value="${q["Quest ID"]}">
+             <div class="qsf-row">
+               <select name="artifactType" class="artifact-select"><option value="" disabled${!currentType ? " selected" : ""}>ARTIFACT...</option>${opts}</select>
+               <input type="text" name="proofLink" placeholder="PASTE LINK OR DETAILS..." class="proof-input" required>
+             </div>
+             <div class="qsf-row">
+               <textarea name="reflection" class="reflection-input" placeholder="WHAT DID YOU LEARN? HOW DID IT GO?" rows="2" required></textarea>
+               <div class="time-group">
+                 <label class="time-label">TIME SPENT</label>
+                 <div class="time-row"><input type="number" name="timeSpent" class="time-input" placeholder="0" min="1" max="600"><span class="time-unit">MIN</span></div>
+               </div>
+             </div>
+             <button type="submit" class="quest-submit-btn" disabled>SUBMIT</button>
+           </form>`;
+        const subjectDisplay = q["Subject"] ? `<div class="tv-detail"><span class="tv-label">SUBJECT:</span> ${escHtml(q["Subject"])}</div>` : "";
+
+        activeExpandHtml += `
+          <div class="ta-expand" id="ta-${aid}">
+            <div class="ta-expand-inner">
+              <div class="tv-header" style="color:#ff8800;">${escHtml(q["Boss"])} &gt; ${escHtml(bookTitle(q["Minion"]))}</div>
+              <div class="tv-detail"><span class="tv-label">SECTOR:</span> ${escHtml(q["Sector"])}</div>
+              ${subjectDisplay}
+              ${isRejected && q["Feedback"] ? `<div class="ta-reject-reason">REJECTED: ${escHtml(q["Feedback"])}</div>` : ""}
+              ${q["Suggested By AI"] ? `<div class="tv-detail"><span class="tv-label">TASK:</span> <span class="tv-task">${escHtml(q["Suggested By AI"])}</span></div>` : ""}
+              ${dueDate ? `<div class="tv-detail"><span class="tv-label">DUE:</span> ${dueDate}</div>` : ""}
+              <div class="ta-submit-area">${submitForm}</div>
+            </div>
+          </div>`;
       }
     }
 
     // Build today's reading HTML (overdue + today's pending)
     let recurringHtml = "";
+    let recurringExpandHtml = "";
+    let chapterIdx = 0;
+    function buildReadingCard(ch, q, badgeHtml, cardClass) {
+      const rid = "rd" + chapterIdx++;
+      const timeEst = ch["Time"] ? `${ch["Time"]} MIN` : "";
+      recurringHtml += `
+        <div class="today-card tr-card ${cardClass}" data-rid="${rid}" onclick="toggleReading('${rid}')">
+          <div class="today-card-top">
+            <span class="today-minion">${escHtml(bookTitle(q["Minion"]))} — CH ${escHtml(ch["Chapter"])}</span>
+            ${badgeHtml}
+          </div>
+          ${ch["Title"] ? `<div class="today-task">${escHtml(ch["Title"])}</div>` : ""}
+        </div>`;
+      recurringExpandHtml += `
+        <div class="tr-expand" id="tr-${rid}">
+          <div class="tr-expand-inner">
+            <div class="tv-header" style="color:#00f2ff;">${escHtml(bookTitle(q["Minion"]))} — CHAPTER ${escHtml(ch["Chapter"])}</div>
+            ${ch["Title"] ? `<div class="tv-detail"><span class="tv-label">TITLE:</span> ${escHtml(ch["Title"])}</div>` : ""}
+            <div class="tv-detail"><span class="tv-label">BOOK:</span> ${escHtml(q["Boss"])} &gt; ${escHtml(q["Minion"])}</div>
+            <div class="tv-detail"><span class="tv-label">SECTOR:</span> ${escHtml(q["Sector"])}</div>
+            ${ch["Scheduled Date"] ? `<div class="tv-detail"><span class="tv-label">SCHEDULED:</span> ${ch["Scheduled Date"]}</div>` : ""}
+            ${timeEst ? `<div class="tv-detail"><span class="tv-label">EST. TIME:</span> ${timeEst}</div>` : ""}
+            ${ch["Details"] ? `<div class="tv-detail"><span class="tv-label">DETAILS:</span> <span class="tv-task">${escHtml(ch["Details"])}</span></div>` : ""}
+          </div>
+        </div>`;
+    }
     // Overdue chapters first
     if (overdueChapters.length > 0) {
       for (const ch of overdueChapters) {
         const q = questMap[ch["Quest ID"]];
         if (!q) continue;
-        recurringHtml += `
-          <a href="/recurring" class="today-card-link"><div class="today-card today-card-overdue">
-            <div class="today-card-top">
-              <span class="today-minion">${escHtml(bookTitle(q["Minion"]))} — CH ${escHtml(ch["Chapter"])}</span>
-              <span class="today-badge today-overdue">OVERDUE</span>
-            </div>
-            ${ch["Details"] ? `<div class="today-task">${escHtml(ch["Details"])}</div>` : ""}
-          </div></a>`;
+        buildReadingCard(ch, q, '<span class="today-badge today-overdue">OVERDUE</span>', "today-card-overdue");
       }
     }
     // Today's pending
@@ -5299,14 +5363,7 @@ app.get("/today", async (req, res) => {
       for (const ch of todayPending) {
         const q = questMap[ch["Quest ID"]];
         if (!q) continue;
-        recurringHtml += `
-          <a href="/recurring" class="today-card-link"><div class="today-card today-card-recurring">
-            <div class="today-card-top">
-              <span class="today-minion">${escHtml(bookTitle(q["Minion"]))} — CH ${escHtml(ch["Chapter"])}</span>
-              <span class="today-badge today-unlogged">PENDING</span>
-            </div>
-            ${ch["Details"] ? `<div class="today-task">${escHtml(ch["Details"])}</div>` : ""}
-          </div></a>`;
+        buildReadingCard(ch, q, '<span class="today-badge today-unlogged">PENDING</span>', "today-card-recurring");
       }
     }
     if (overdueChapters.length === 0 && todayChapters.length === 0) {
@@ -5338,13 +5395,15 @@ app.get("/today", async (req, res) => {
 
     // Build recent completions HTML
     let recentHtml = "";
+    let recentExpandHtml = "";
     if (recentCompleted.length === 0) {
       recentHtml = '<div class="today-empty">NO COMPLETED QUESTS YET. YOUR FIRST VICTORY AWAITS.</div>';
     } else {
       for (const q of recentCompleted) {
         const timeStr = q["Time Spent"] ? `${q["Time Spent"]} MIN` : "";
+        const vid = (q["Quest ID"] || "").replace(/[^A-Z0-9]/gi, "");
         recentHtml += `
-          <a href="/progress" class="today-card-link"><div class="today-card today-card-victory">
+          <div class="today-card today-card-victory tv-card" data-vid="${vid}" onclick="toggleVictory('${vid}')">
             <div class="today-card-top">
               <span class="today-minion">${escHtml(bookTitle(q["Minion"]))}</span>
               <span class="today-date">${q["Date Resolved"] || ""}</span>
@@ -5353,8 +5412,24 @@ app.get("/today", async (req, res) => {
               <span class="today-boss">${escHtml(q["Boss"])}</span>
               ${timeStr ? `<span class="today-time">${timeStr}</span>` : ""}
             </div>
-            ${q["Reflection"] ? `<div class="today-reflection">"${escHtml(q["Reflection"])}"</div>` : ""}
-          </div></a>`;
+          </div>`;
+        const proofDisplay = q["Proof Link"]
+          ? `<a href="${escHtml(q["Proof Link"])}" target="_blank" rel="noopener" class="tv-proof-link">${q["Proof Type"] ? `[${escHtml(q["Proof Type"])}] ` : ""}${escHtml(q["Proof Link"])}</a>`
+          : '<span class="tv-no-proof">NO PROOF LINK</span>';
+        recentExpandHtml += `
+          <div class="tv-expand" id="tv-${vid}">
+            <div class="tv-expand-inner">
+              <div class="tv-header">${escHtml(q["Boss"])} &gt; ${escHtml(bookTitle(q["Minion"]))}</div>
+              <div class="tv-detail"><span class="tv-label">SECTOR:</span> ${escHtml(q["Sector"])}</div>
+              ${q["Subject"] ? `<div class="tv-detail"><span class="tv-label">SUBJECT:</span> ${escHtml(q["Subject"])}</div>` : ""}
+              ${q["Suggested By AI"] ? `<div class="tv-detail"><span class="tv-label">TASK:</span> <span class="tv-task">${escHtml(q["Suggested By AI"])}</span></div>` : ""}
+              <div class="tv-detail"><span class="tv-label">PROOF:</span> ${proofDisplay}</div>
+              ${timeStr ? `<div class="tv-detail"><span class="tv-label">TIME:</span> ${timeStr}</div>` : ""}
+              ${q["Date Completed"] ? `<div class="tv-detail"><span class="tv-label">SUBMITTED:</span> ${q["Date Completed"]}</div>` : ""}
+              ${q["Date Resolved"] ? `<div class="tv-detail"><span class="tv-label">APPROVED:</span> ${q["Date Resolved"]}</div>` : ""}
+              ${q["Reflection"] ? `<div class="tv-reflection">"${escHtml(q["Reflection"])}"</div>` : ""}
+            </div>
+          </div>`;
       }
     }
 
@@ -5474,6 +5549,46 @@ app.get("/today", async (req, res) => {
     .today-card-submitted { border-color: rgba(255, 234, 0, 0.2); background: rgba(255, 234, 0, 0.02); }
     .today-card-victory { border-color: rgba(0, 255, 157, 0.2); background: rgba(0, 255, 157, 0.02); }
     .today-card-victory:hover { border-color: rgba(0, 255, 157, 0.5); }
+    /* Expandable card shared styles */
+    .ta-card, .tr-card, .tv-card { cursor: pointer; }
+    .ta-card.active { border-color: #ff8800; background: rgba(255, 136, 0, 0.06); }
+    .tr-card.active { border-color: #00f2ff; background: rgba(0, 242, 255, 0.06); }
+    .tv-card.active { border-color: #00ff9d; background: rgba(0, 255, 157, 0.06); }
+    .ta-expand, .tr-expand, .tv-expand { display: none; border: 1px solid rgba(255, 136, 0, 0.3); border-top: 0; margin-bottom: 6px; margin-top: -6px; animation: expandFade 0.2s ease; }
+    .tr-expand { border-color: rgba(0, 242, 255, 0.3); background: rgba(0, 242, 255, 0.02); }
+    .tv-expand { border-color: rgba(0, 255, 157, 0.3); background: rgba(0, 255, 157, 0.02); }
+    .ta-expand { background: rgba(255, 136, 0, 0.02); }
+    .ta-expand.open, .tr-expand.open, .tv-expand.open { display: block; }
+    .ta-expand-inner, .tr-expand-inner, .tv-expand-inner { padding: 12px; }
+    @keyframes expandFade { from { opacity: 0; } to { opacity: 1; } }
+    .tv-header { color: #00ff9d; font-size: 0.8em; font-weight: bold; letter-spacing: 2px; margin-bottom: 8px; }
+    .tv-detail { font-size: 0.75em; color: #aaa; margin-bottom: 4px; text-transform: none; }
+    .tv-label { color: #888; letter-spacing: 1px; text-transform: uppercase; }
+    .tv-task { color: #ccc; }
+    .tv-proof-link { color: #00f2ff; text-decoration: none; word-break: break-all; }
+    .tv-proof-link:hover { color: #fff; text-decoration: underline; }
+    .tv-no-proof { color: #555; }
+    .tv-reflection { font-size: 0.75em; color: #00f2ff; margin-top: 8px; text-transform: none; font-style: italic; border-left: 2px solid #00ff9d; padding-left: 8px; }
+    .ta-reject-reason { font-size: 0.75em; color: #ff0044; margin-bottom: 6px; text-transform: none; padding: 4px 8px; background: rgba(255,0,68,0.06); border-left: 2px solid #ff0044; }
+    .ta-submit-area { margin-top: 10px; border-top: 1px solid rgba(255,136,0,0.15); padding-top: 10px; }
+    /* Quest form styles for today page */
+    .quest-submit-form { display: flex; flex-direction: column; gap: 8px; }
+    .qsf-row { display: flex; gap: 8px; align-items: center; }
+    .proof-input { flex: 1; background: #1a1d26; border: 1px solid #333; color: #00f2ff; padding: 6px 10px; font-family: 'Courier New', monospace; font-size: 0.75em; text-transform: none; }
+    .proof-input:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
+    .reflection-input { flex: 1; background: #1a1d26; border: 1px solid #333; color: #00f2ff; padding: 6px 10px; font-family: 'Courier New', monospace; font-size: 0.75em; text-transform: none; resize: vertical; }
+    .reflection-input:focus { outline: none; border-color: #00f2ff; box-shadow: 0 0 5px rgba(0, 242, 255, 0.3); }
+    .artifact-select { background: #1a1d26; border: 1px solid #333; color: #ffea00; padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em; text-transform: uppercase; }
+    .artifact-select:focus { outline: none; border-color: #ffea00; }
+    .time-group { display: flex; flex-direction: column; gap: 2px; }
+    .time-label { font-size: 0.6em; color: #888; letter-spacing: 1px; }
+    .time-row { display: flex; align-items: center; gap: 4px; }
+    .time-input { background: #1a1d26; border: 1px solid #333; color: #ff8800; padding: 6px 8px; font-family: 'Courier New', monospace; font-size: 0.75em; width: 60px; text-align: center; }
+    .time-input:focus { outline: none; border-color: #ff8800; }
+    .time-unit { font-size: 0.7em; color: #888; }
+    .quest-submit-btn { background: none; border: 1px solid #00ff9d; color: #00ff9d; padding: 8px 20px; font-family: 'Courier New', monospace; font-size: 0.8em; text-transform: uppercase; letter-spacing: 2px; cursor: pointer; transition: all 0.2s; }
+    .quest-submit-btn:hover:not(:disabled) { background: #00ff9d; color: #0a0b10; }
+    .quest-submit-btn:disabled { border-color: #444; color: #555; cursor: not-allowed; opacity: 0.5; }
     .today-card-top { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
     .today-minion { font-weight: bold; letter-spacing: 1px; font-size: 0.85em; }
     .today-badges { display: flex; gap: 6px; flex-shrink: 0; }
@@ -5545,6 +5660,8 @@ app.get("/today", async (req, res) => {
         .today-gif img { max-width: 180px; margin: 0 auto; }
         .today-quote { padding: 10px; }
         .today-quote-text { font-size: 0.75em; letter-spacing: 1px; }
+        .qsf-row { flex-direction: column; }
+        .quest-submit-form { gap: 6px; }
     }
     </style>
 </head>
@@ -5569,11 +5686,13 @@ app.get("/today", async (req, res) => {
         <div class="today-section section-ops">
             <a href="/quests" class="today-section-link"><div class="today-section-header">ACTIVE OPERATIONS <span class="section-count">(${sortedActive.length})</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${activeHtml}
+            ${activeExpandHtml}
         </div>` : ""}
         ${todayChapters.length > 0 || overdueChapters.length > 0 || recurringQuests.length > 0 ? `
         <div class="today-section section-recurring">
             <a href="/recurring" class="today-section-link"><div class="today-section-header">READING${overdueChapters.length > 0 ? ` <span class="section-count">(${overdueChapters.length} overdue)</span>` : todayPending.length > 0 ? ` <span class="section-count">(${todayPending.length} pending)</span>` : ""} <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${recurringHtml}
+            ${recurringExpandHtml}
         </div>` : ""}
         ${submitted.length > 0 ? `
         <div class="today-section section-submitted">
@@ -5583,8 +5702,48 @@ app.get("/today", async (req, res) => {
         <div class="today-section section-victories">
             <a href="/progress" class="today-section-link"><div class="today-section-header">RECENT VICTORIES <span class="section-count">(${recentCompleted.length})</span> <span class="today-section-arrow">&gt;&gt;</span></div></a>
             ${recentHtml}
+            ${recentExpandHtml}
         </div>
     </div>
+    <script>
+    function closeAllPanels() {
+        document.querySelectorAll('.ta-expand.open, .tr-expand.open, .tv-expand.open').forEach(function(p) { p.classList.remove('open'); });
+        document.querySelectorAll('.ta-card.active, .tr-card.active, .tv-card.active').forEach(function(c) { c.classList.remove('active'); });
+    }
+    function togglePanel(prefix, dataAttr, id) {
+        var panel = document.getElementById(prefix + '-' + id);
+        var card = document.querySelector('.' + prefix + '-card[data-' + dataAttr + '="' + id + '"]');
+        var isOpen = panel.classList.contains('open');
+        closeAllPanels();
+        if (!isOpen) {
+            panel.classList.add('open');
+            card.classList.add('active');
+            card.parentNode.insertBefore(panel, card.nextSibling);
+            setTimeout(function() { panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' }); }, 100);
+        }
+    }
+    function toggleActive(aid) { togglePanel('ta', 'aid', aid); }
+    function toggleReading(rid) { togglePanel('tr', 'rid', rid); }
+    function toggleVictory(vid) { togglePanel('tv', 'vid', vid); }
+
+    // Enable submit button when form fields are filled
+    document.querySelectorAll('.quest-submit-form').forEach(function(form) {
+        var proof = form.querySelector('.proof-input');
+        var reflection = form.querySelector('.reflection-input');
+        var timeInput = form.querySelector('.time-input');
+        var btn = form.querySelector('.quest-submit-btn');
+        if (!proof || !btn) return;
+        function check() {
+            var hasProof = proof.value.trim().length > 0;
+            var hasReflection = reflection ? reflection.value.trim().length > 0 : true;
+            var hasTime = timeInput ? parseInt(timeInput.value) > 0 : true;
+            btn.disabled = !(hasProof && hasReflection && hasTime);
+        }
+        proof.addEventListener('input', check);
+        if (reflection) reflection.addEventListener('input', check);
+        if (timeInput) timeInput.addEventListener('input', check);
+    });
+    </script>
 </body>
 </html>`);
   } catch (err) {
@@ -5618,9 +5777,9 @@ app.get("/recurring", async (req, res) => {
 
     const today = new Date().toISOString().slice(0, 10);
 
-    // Collect overdue + next upcoming per book, grouped together
+    // Collect overdue + all upcoming per book, grouped together
     const overdueByQuest = {}; // questId -> [chapters]
-    const nextPerBook = {};    // questId -> single chapter
+    const upcomingByQuest = {}; // questId -> [chapters]
 
     for (const s of schedule) {
       const sd = (s["Scheduled Date"] || "").slice(0, 10);
@@ -5634,26 +5793,27 @@ app.get("/recurring", async (req, res) => {
         if (!overdueByQuest[qid]) overdueByQuest[qid] = [];
         overdueByQuest[qid].push({ ...s, quest: q });
       } else if (sd >= today && !isDone) {
-        if (!nextPerBook[qid] || sd < (nextPerBook[qid]["Scheduled Date"] || "").slice(0, 10) ||
-            (sd === (nextPerBook[qid]["Scheduled Date"] || "").slice(0, 10) && (parseInt(s["Chapter"]) || 0) < (parseInt(nextPerBook[qid]["Chapter"]) || 0))) {
-          nextPerBook[qid] = { ...s, quest: q };
-        }
+        if (!upcomingByQuest[qid]) upcomingByQuest[qid] = [];
+        upcomingByQuest[qid].push({ ...s, quest: q });
       }
     }
 
-    // Sort overdue within each book by date then chapter
+    // Sort within each book by date then chapter
     for (const qid of Object.keys(overdueByQuest)) {
       overdueByQuest[qid].sort((a, b) => (a["Scheduled Date"] || "").localeCompare(b["Scheduled Date"] || "") || (parseInt(a["Chapter"]) || 0) - (parseInt(b["Chapter"]) || 0));
     }
+    for (const qid of Object.keys(upcomingByQuest)) {
+      upcomingByQuest[qid].sort((a, b) => (a["Scheduled Date"] || "").localeCompare(b["Scheduled Date"] || "") || (parseInt(a["Chapter"]) || 0) - (parseInt(b["Chapter"]) || 0));
+    }
 
     // Build unified book list: all quest IDs that have overdue or upcoming
-    const allQuestIds = new Set([...Object.keys(overdueByQuest), ...Object.keys(nextPerBook)]);
+    const allQuestIds = new Set([...Object.keys(overdueByQuest), ...Object.keys(upcomingByQuest)]);
     const bookGroups = [];
     for (const qid of allQuestIds) {
       const overdueChapters = overdueByQuest[qid] || [];
-      const nextChapter = nextPerBook[qid] || null;
-      const quest = overdueChapters.length > 0 ? overdueChapters[0].quest : nextChapter.quest;
-      bookGroups.push({ qid, quest, overdueChapters, nextChapter });
+      const upcomingChapters = upcomingByQuest[qid] || [];
+      const quest = overdueChapters.length > 0 ? overdueChapters[0].quest : upcomingChapters[0].quest;
+      bookGroups.push({ qid, quest, overdueChapters, upcomingChapters });
     }
     // Sort books: those with overdue first, then by book name
     bookGroups.sort((a, b) => {
@@ -5700,15 +5860,15 @@ app.get("/recurring", async (req, res) => {
       let totalMin = 0;
       for (const bg of bookGroups) {
         booksHtml += `<div class="sched-book-group">
-          <div class="sched-book-header">${escHtml(bookTitle(bg.quest["Minion"]))}</div>
+          <div class="sched-book-header">${escHtml(bookTitle(bg.quest["Minion"]))} <span class="sched-book-count">${bg.overdueChapters.length + bg.upcomingChapters.length} chapters</span></div>
           <div class="sched-list">`;
         for (const ch of bg.overdueChapters) {
           booksHtml += buildCard(ch, "sched-card-overdue");
           totalMin += parseInt(ch["Time"] || "0") || 0;
         }
-        if (bg.nextChapter) {
-          booksHtml += buildCard(bg.nextChapter, "");
-          totalMin += parseInt(bg.nextChapter["Time"] || "0") || 0;
+        for (const ch of bg.upcomingChapters) {
+          booksHtml += buildCard(ch, "");
+          totalMin += parseInt(ch["Time"] || "0") || 0;
         }
         booksHtml += `</div></div>`;
       }
@@ -5785,6 +5945,7 @@ app.get("/recurring", async (req, res) => {
         padding: 4px 12px;
         margin-bottom: 4px;
     }
+    .sched-book-count { color: #555; font-weight: normal; font-size: 0.85em; }
     /* Cards */
     .sched-card {
         padding: 8px 12px;
@@ -5863,7 +6024,8 @@ app.get("/recurring", async (req, res) => {
 <body>
     <div class="hud-container">
         <div class="nav-links">
-            <a class="back-link" href="/">&lt; BACK TO HUD</a>
+            <a class="back-link" href="/">&lt; HUD</a>
+            <a class="back-link" href="/today" style="border-color:#ff8800;color:#ff8800;">TODAY</a>
             <a class="back-link" href="/quests">QUEST BOARD &gt;</a>
         </div>
         <h1>Reading Schedule</h1>
@@ -5909,10 +6071,6 @@ app.get("/recurring", async (req, res) => {
     console.error("Schedule page error:", err);
     res.status(500).send(errorPage(err.message));
   }
-});
-
-app.post("/recurring/log", async (req, res) => {
-  res.status(410).send("This endpoint has been replaced by the chapter schedule system. Visit /recurring for the reading schedule.");
 });
 
 // Teacher: update time spent on a recurring log entry
@@ -6346,7 +6504,7 @@ app.get("/admin/recurring", async (req, res) => {
 </head>
 <body>
     <div class="hud-container">
-        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/admin/curriculum">&lt; CURRICULUM</a><a class="back-link" href="/admin">&lt; ADMIN</a></div>
+        <div style="display:flex;gap:10px;margin-bottom:15px;"><a class="back-link" href="/">&lt; HUD</a><a class="back-link" href="/admin/curriculum">&lt; CURRICULUM</a><a class="back-link" href="/admin">&lt; ADMIN</a></div>
         <h1>Chapter Schedule</h1>
         ${booksHtml}
     </div>
@@ -6484,7 +6642,7 @@ app.post("/admin/recurring/add-chapters", async (req, res) => {
     );
 
     const newRows = [];
-    for (let i = start; i <= n; i++) {
+    for (let i = start; i < start + n; i++) {
       if (!existingChapters.has(i)) {
         newRows.push([questId, String(i), "", "30", "", "", ""]);
       }
@@ -6498,6 +6656,7 @@ app.post("/admin/recurring/add-chapters", async (req, res) => {
         insertDataOption: "INSERT_ROWS",
         requestBody: { values: newRows },
       });
+      cacheInvalidate("schedule");
     }
 
     res.json({ success: true, added: newRows.length });
@@ -6576,6 +6735,7 @@ app.post("/admin/recurring/update-chapter", async (req, res) => {
       }
     }
 
+    cacheInvalidate("schedule");
     res.json({ success: true, allDone });
   } catch (err) {
     console.error("Update chapter error:", err);
@@ -6793,6 +6953,7 @@ app.post("/admin/recurring/delete-chapter", async (req, res) => {
       }
     });
 
+    cacheInvalidate("schedule");
     res.json({ success: true });
   } catch (err) {
     console.error("Delete chapter error:", err);
@@ -6899,6 +7060,7 @@ app.post("/admin/recurring/remove-book", async (req, res) => {
       }
     }
 
+    cacheInvalidate("schedule", "quests", "sheetData");
     res.json({ success: true });
   } catch (err) {
     console.error("Remove book error:", err);
@@ -7159,7 +7321,7 @@ app.get("/army", async (req, res) => {
       tempo: getStat(commandCenter, "Tempo").totalPossible,
       rep: getStat(commandCenter, "Reputation").totalPossible,
     };
-    const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+  
 
     // Determine "recent" threshold (7 days ago)
     const recentCutoff = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
@@ -7404,7 +7566,7 @@ app.get("/defiant", async (req, res) => {
       tempo: getStat(commandCenter, "Tempo").totalPossible,
       rep: getStat(commandCenter, "Reputation").totalPossible,
     };
-    const norm = (raw, max) => ((parseFloat(raw) || 0) / max * 100).toFixed(1);
+  
 
     // Filter non-enslaved minions, group by sector
     const sectorMap = {};
@@ -12096,19 +12258,6 @@ app.post("/admin/import/approve", async (req, res) => {
   } catch (err) {
     console.error("Import approve error:", err);
     res.status(500).json({ error: err.message });
-  }
-});
-
-// ---------------------------------------------------------------------------
-// Admin: Test Weekly Email (temporary — remove after confirming it works)
-// ---------------------------------------------------------------------------
-app.get("/admin/test-email", async (req, res) => {
-  try {
-    await sendWeeklySummaryEmail();
-    res.send(`<pre style="color:#00ff9d;background:#0a0b10;padding:20px;font-family:monospace;">Weekly summary email sent! Check teacher inboxes.</pre>`);
-  } catch (err) {
-    console.error("Test email error:", err);
-    res.status(500).send(errorPage(err.message));
   }
 });
 
